@@ -1,0 +1,23 @@
+name: Jules AI Agent
+
+# 設定觸發條件：當新增 Issue 或在 Issue 底下留言時啟動
+on:
+  issues:
+    types: [opened]
+  issue_comment:
+    types: [created]
+
+jobs:
+  run-jules:
+    runs-on: ubuntu-latest
+    steps:
+      # 允許腳本讀取你的程式碼
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      # 截圖中的 Jules Invoke 語法
+      - name: Jules Invoke
+        uses: BeksOmega/jules-action@v1.0.0
+        env:
+          # 授權 Jules 可以推播程式碼到你的 GitHub
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
