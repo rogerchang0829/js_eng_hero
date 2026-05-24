@@ -222,6 +222,12 @@ function pickWeightedWord(words: WordItem[]): WordItem {
   return weighted[weighted.length - 1].word;
 }
 
+function getSuggestedFlashcardGoal(totalWords: number): number {
+  if (totalWords <= 0) return 0;
+  if (totalWords <= 8) return totalWords;
+  return Math.min(totalWords, 12);
+}
+
 const PRELOAD_WORDS: Omit<WordItem, "id">[] = [
   { word: "coordinate", definitionZh: "協調", pos: "verb", ipa: "/koʊˈɔrdɪneɪt/", sentence: "Please coordinate with design before release." },
   { word: "deadline", definitionZh: "截止期限", pos: "noun", ipa: "/ˈdedlaɪn/", sentence: "The deadline for this sprint is Friday." },
@@ -1009,15 +1015,25 @@ function SmartLabView({
 }
 
 function FlashcardView({ words, onStudyWord }: { words: WordItem[]; onStudyWord: (wordId: string, action: "view" | "speak") => void }) {
+  const suggestedGoal = getSuggestedFlashcardGoal(words.length);
+  const [targetCount, setTargetCount] = useState(suggestedGoal);
+  const [sessionWords, setSessionWords] = useState<WordItem[]>([]);
   const [index, setIndex] = useState(0);
   const [flipped, setFlipped] = useState(false);
+  const [cardSeconds, setCardSeconds] = useState(0);
   const viewedThisSessionRef = useRef<Set<string>>(new Set());
-  const current = words[index];
+  const current = sessionWords[index];
   const currentId = current?.id;
 
   useEffect(() => {
-    queueMicrotask(() => setIndex((prev) => (words.length === 0 ? 0 : prev % words.length)));
-  }, [words.length]);
+    queueMicrotask(() => setIndex((prev) => (sessionWords.length === 0 ? 0 : prev % sessionWords.length)));
+  }, [sessionWords.length]);
+
+  useEffect(() => {
+    if (!currentId) return;
+    const timer = window.setInterval(() => setCardSeconds((prev) => prev + 1), 1000);
+    return () => window.clearInterval(timer);
+  }, [currentId, flipped]);
 
   useEffect(() => {
     if (!currentId) return;
@@ -1029,11 +1045,79 @@ function FlashcardView({ words, onStudyWord }: { words: WordItem[]; onStudyWord:
     return () => window.clearTimeout(timer);
   }, [currentId, onStudyWord]);
 
-  if (!current) return <EmptyView title="尚無單字" description="請先到 Smart Lab 匯入或新增單字。" />;
+  if (!words.length) return <EmptyView title="尚無單字" description="請先到 Smart Lab 匯入或新增單字。" />;
+
+  const startSession = () => {
+    const nextWords = sortForPractice(words).slice(0, Math.max(1, Math.min(targetCount || suggestedGoal, words.length)));
+    viewedThisSessionRef.current = new Set();
+    setSessionWords(nextWords);
+    setIndex(0);
+    setFlipped(false);
+    setCardSeconds(0);
+  };
+
+  if (!sessionWords.length) {
+    const previewWords = sortForPractice(words).slice(0, Math.max(1, Math.min(targetCount || suggestedGoal, words.length)));
+    return (
+      <div className="space-y-4 px-4 py-5">
+        <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+          <p className="text-xs font-semibold uppercase text-slate-500">Flashcard Session</p>
+          <h2 className="mt-1 text-2xl font-bold text-slate-900">本次想記幾個單字？</h2>
+          <p className="mt-2 text-sm text-slate-500">建議值：{suggestedGoal} 個。系統會優先安排熟練度較低、較需要複習的單字。</p>
+          <label className="mt-4 block text-sm font-semibold text-slate-700">
+            目標字數 {targetCount}
+            <input
+              type="range"
+              min="1"
+              max={Math.max(1, words.length)}
+              step="1"
+              value={Math.max(1, Math.min(targetCount || suggestedGoal, words.length))}
+              onChange={(e) => setTargetCount(Number(e.target.value))}
+              className="mt-2 w-full accent-blue-600"
+            />
+          </label>
+          <div className="mt-3 flex gap-2">
+            <button
+              type="button"
+              onClick={() => setTargetCount(suggestedGoal)}
+              className="flex-1 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700"
+            >
+              使用建議值
+            </button>
+            <button type="button" onClick={startSession} className="flex-1 rounded-xl bg-blue-600 px-3 py-2 text-sm font-semibold text-white">
+              確認並開始
+            </button>
+          </div>
+        </section>
+
+        <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+          <p className="text-sm font-semibold text-slate-700">本次推薦單字</p>
+          <div className="mt-3 space-y-2">
+            {previewWords.map((word, idx) => {
+              const mastery = getMasterySnapshot(word);
+              return (
+                <div key={word.id} className="flex items-center justify-between rounded-xl bg-slate-50 px-3 py-2">
+                  <div>
+                    <p className="text-sm font-semibold text-slate-900">
+                      {idx + 1}. {word.word}
+                    </p>
+                    <p className="text-xs text-slate-500">{word.definitionZh}</p>
+                  </div>
+                  <span className="rounded-lg bg-blue-50 px-2 py-1 text-xs font-bold text-blue-700">{mastery.score}</span>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      </div>
+    );
+  }
+
+  if (!current) return <EmptyView title="尚無單字" description="請重新開始本次 Flashcard。" />;
 
   const shift = (delta: number) => {
     setFlipped(false);
-    setIndex((prev) => (prev + delta + words.length) % words.length);
+    setIndex((prev) => (prev + delta + sessionWords.length) % sessionWords.length);
   };
 
   const speakWord = () => {
@@ -1052,13 +1136,28 @@ function FlashcardView({ words, onStudyWord }: { words: WordItem[]; onStudyWord:
   const exampleLines = (current.examples || [])
     .filter((line) => line && line !== current.sentence)
     .slice(0, 3);
+  const progressPercent = Math.round(((index + 1) / sessionWords.length) * 100);
 
   return (
     <div className="px-4 py-6">
+      <div className="mx-auto mb-4 max-w-md rounded-2xl border border-slate-200 bg-white p-3 shadow-sm">
+        <div className="flex items-center justify-between text-xs text-slate-500">
+          <span>
+            {index + 1}/{sessionWords.length}
+          </span>
+          <span>閱讀 {secondsToClock(cardSeconds)}</span>
+        </div>
+        <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-100">
+          <div className="h-full rounded-full bg-blue-600" style={{ width: `${progressPercent}%` }} />
+        </div>
+      </div>
       <div className="mx-auto w-full max-w-md [perspective:1200px]">
         <button
           type="button"
-          onClick={() => setFlipped((p) => !p)}
+          onClick={() => {
+            setCardSeconds(0);
+            setFlipped((p) => !p);
+          }}
           className={`relative block h-[360px] w-full rounded-3xl text-left transition-transform duration-500 [transform-style:preserve-3d] ${
             flipped ? "[transform:rotateY(180deg)]" : ""
           }`}
@@ -1143,6 +1242,15 @@ function FlashcardView({ words, onStudyWord }: { words: WordItem[]; onStudyWord:
         >
           下一個
           <ChevronRight size={16} />
+        </button>
+      </div>
+      <div className="mx-auto mt-3 max-w-md">
+        <button
+          type="button"
+          onClick={() => setSessionWords([])}
+          className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-600"
+        >
+          重新設定本次目標
         </button>
       </div>
     </div>
