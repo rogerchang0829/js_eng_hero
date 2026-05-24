@@ -1051,9 +1051,11 @@ function DefenseGameView({
         const alive = moved.filter((item) => item.y < 92);
         const missedCount = moved.filter((item) => !item.isHit).length - alive.filter((item) => !item.isHit).length;
         if (missedCount > 0) {
-          Array.from({ length: missedCount }).forEach(() => onMiss());
-          setHp((old) => Math.max(0, old - missedCount));
-          setSessionMisses((old) => old + missedCount);
+          window.setTimeout(() => {
+            Array.from({ length: missedCount }).forEach(() => onMiss());
+            setHp((old) => Math.max(0, old - missedCount));
+            setSessionMisses((old) => old + missedCount);
+          }, 0);
         }
         return alive;
       });
