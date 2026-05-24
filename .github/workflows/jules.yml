@@ -15,10 +15,13 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
       
-      # 截圖中的 Jules Invoke 語法
+# 截圖中的 Jules Invoke 語法與完整授權
       - name: Jules Invoke
         uses: BeksOmega/jules-action@v1.0.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
         env:
-          # 授權 Jules 可以推播程式碼到你的 GitHub
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GEMINI_API_KEY: ${{ secrets.JULES_API_KEY }}
+          GOOGLE_API_KEY: ${{ secrets.JULES_API_KEY }}
           JULES_API_KEY: ${{ secrets.JULES_API_KEY }}
