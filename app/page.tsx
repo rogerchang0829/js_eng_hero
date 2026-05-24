@@ -1428,24 +1428,33 @@ function DefenseGameView({
   const isMatchMode = settings.mode === "2-2" || settings.mode === "3";
   const lanes = useMemo(() => (isMatchMode ? [18, 42, 66, 88] : [28, 72]), [isMatchMode]);
   const wordIdsKey = useMemo(() => words.map((word) => word.id).join("|"), [words]);
+  const fallingQuestionKey = useMemo(() => {
+    const ids = new Set<string>();
+    falling.forEach((item) => {
+      if (!item.isHit && item.cardKind === "question") ids.add(item.id);
+    });
+    return Array.from(ids).sort().join("|");
+  }, [falling]);
   const answerOptions = useMemo<AnswerOption[]>(() => {
     if (!isMatchMode) return [];
+    const questionIds = new Set(fallingQuestionKey.split("|").filter(Boolean));
+    const visibleQuestions = words.filter((word) => questionIds.has(word.id));
+    if (!visibleQuestions.length) return [];
     const existingWords = new Set(words.map((word) => word.word.toLowerCase()));
-    const validOptions = words.map((word) => ({
+    const validOptions = visibleQuestions.map((word) => ({
       optionId: `answer_${word.id}`,
       wordId: word.id,
       word: word.word,
     }));
-    const distractorCount = Math.min(5, Math.max(2, Math.ceil(words.length * 0.3)));
     const distractors = DISTRACTOR_ANSWERS.filter((word) => !existingWords.has(word.toLowerCase()))
-      .slice(0, distractorCount)
+      .slice(0, 2)
       .map((word, idx) => ({
         optionId: `distractor_${settings.mode}_${idx}_${word}`,
         word,
         isDistractor: true,
       }));
-    return shuffleByKey([...validOptions, ...distractors], `${settings.mode}_${wordIdsKey}`);
-  }, [isMatchMode, settings.mode, wordIdsKey, words]);
+    return shuffleByKey([...validOptions, ...distractors], `${settings.mode}_${fallingQuestionKey}`);
+  }, [fallingQuestionKey, isMatchMode, settings.mode, words]);
   const levelGoal = singleLevel ? Math.max(words.length + 1, Math.ceil(words.length * 1.35)) : getLevelGoal(gameLevel);
   const levelTimeLimit = singleLevel ? Math.max(45, words.length * 7) : getLevelTimeLimit(gameLevel);
   const timeUrgency = 1 - timeRemaining / levelTimeLimit;
