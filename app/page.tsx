@@ -96,6 +96,9 @@ interface FallingWord extends WordItem {
   y: number;
   lane: number;
   bornAt: number;
+  pairId?: string;
+  cardKind?: "question" | "answer";
+  isDragging?: boolean;
   isHit?: boolean;
 }
 
@@ -500,6 +503,10 @@ function secondsToClock(total: number): string {
     .toString()
     .padStart(2, "0");
   return `${mm}:${ss}`;
+}
+
+function nowMs(): number {
+  return Date.now();
 }
 
 export default function EnglishHeroPage() {
@@ -1366,14 +1373,18 @@ function DefenseGameView({
   const [rewards, setRewards] = useState<RewardToast[]>([]);
   const rafRef = useRef<number | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const playAreaRef = useRef<HTMLDivElement | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const bgmAudioRef = useRef<HTMLAudioElement | null>(null);
   const bgmTimerRef = useRef<number | null>(null);
   const beatStepRef = useRef(0);
   const timeUrgencyRef = useRef(0);
   const gameLevelRef = useRef(1);
+  const wordsRef = useRef(words);
   const singleLevelQueueRef = useRef<WordItem[]>([]);
-  const lanes = useMemo(() => [28, 72], []);
+  const isMatchMode = settings.mode === "2-2" || settings.mode === "3";
+  const lanes = useMemo(() => (isMatchMode ? [16, 38, 62, 84] : [28, 72]), [isMatchMode]);
+  const wordIdsKey = useMemo(() => words.map((word) => word.id).join("|"), [words]);
   const levelGoal = singleLevel ? Math.max(words.length + 1, Math.ceil(words.length * 1.35)) : getLevelGoal(gameLevel);
   const levelTimeLimit = singleLevel ? Math.max(45, words.length * 7) : getLevelTimeLimit(gameLevel);
   const timeUrgency = 1 - timeRemaining / levelTimeLimit;
@@ -1385,9 +1396,13 @@ function DefenseGameView({
     return audioCtxRef.current;
   };
 
+  useEffect(() => {
+    wordsRef.current = words;
+  }, [words]);
+
   const resetSingleLevelQueue = useCallback(() => {
-    singleLevelQueueRef.current = singleLevel ? [...words].sort(() => Math.random() - 0.5) : [];
-  }, [singleLevel, words]);
+    singleLevelQueueRef.current = singleLevel ? [...wordsRef.current].sort(() => Math.random() - 0.5) : [];
+  }, [singleLevel]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -1454,7 +1469,7 @@ function DefenseGameView({
 
   useEffect(() => {
     resetSingleLevelQueue();
-  }, [resetSingleLevelQueue]);
+  }, [resetSingleLevelQueue, wordIdsKey]);
 
   useEffect(() => {
     if (phase !== "playing") return;
@@ -1476,6 +1491,36 @@ function DefenseGameView({
       const pick = singleLevel && singleLevelQueueRef.current.length > 0 ? singleLevelQueueRef.current.shift()! : pickWeightedWord(words);
       setFalling((prev) => {
         const openLanes = lanes.filter((lane, idx) => !prev.some((item) => item.lane === idx && item.y < 30));
+        if (isMatchMode) {
+          if (openLanes.length < 2) return prev;
+          const shuffled = [...openLanes].sort(() => Math.random() - 0.5);
+          const questionLaneIndex = lanes.indexOf(shuffled[0]);
+          const answerLaneIndex = lanes.indexOf(shuffled[1]);
+          const pairId = makeId();
+          return [
+            ...prev,
+            {
+              ...pick,
+              gameId: makeId(),
+              pairId,
+              cardKind: "question",
+              x: lanes[questionLaneIndex],
+              y: -12,
+              lane: questionLaneIndex,
+              bornAt: nowMs(),
+            },
+            {
+              ...pick,
+              gameId: makeId(),
+              pairId,
+              cardKind: "answer",
+              x: lanes[answerLaneIndex],
+              y: -12,
+              lane: answerLaneIndex,
+              bornAt: nowMs(),
+            },
+          ];
+        }
         if (!openLanes.length) return prev;
         const laneIndex = lanes.indexOf(openLanes[Math.floor(Math.random() * openLanes.length)]);
         return [
@@ -1486,29 +1531,32 @@ function DefenseGameView({
             x: lanes[laneIndex],
             y: -12,
             lane: laneIndex,
-            bornAt: Date.now(),
+            bornAt: nowMs(),
           },
         ];
       });
     }, settings.spawnMs);
     return () => window.clearInterval(spawn);
-  }, [words, settings.spawnMs, hp, phase, lanes, singleLevel]);
+  }, [words, settings.spawnMs, hp, phase, lanes, singleLevel, isMatchMode]);
 
   useEffect(() => {
     if (phase !== "playing") return;
     const tick = () => {
       setFalling((prev) => {
-        const moved = prev.map((item) => (item.isHit ? item : { ...item, y: item.y + settings.speed }));
+        const moved = prev.map((item) => (item.isHit || item.isDragging ? item : { ...item, y: item.y + settings.speed }));
         const alive = moved.filter((item) => item.y < 92);
         const missedItems = moved.filter((item) => !item.isHit && item.y >= 92);
         if (missedItems.length > 0) {
           window.setTimeout(() => {
-            missedItems.forEach((item) => {
+            const uniqueMisses = Array.from(
+              new Map(missedItems.map((item) => [item.pairId || item.gameId, item])).values(),
+            );
+            uniqueMisses.forEach((item) => {
               onMiss();
               onWordResult(item.id, "miss");
             });
-            setHp((old) => Math.max(0, old - missedItems.length));
-            setSessionMisses((old) => old + missedItems.length);
+            setHp((old) => Math.max(0, old - uniqueMisses.length));
+            setSessionMisses((old) => old + uniqueMisses.length);
           }, 0);
         }
         return alive;
@@ -1745,7 +1793,7 @@ function DefenseGameView({
     const data = buffer.getChannelData(0);
     for (let i = 0; i < noiseLength; i += 1) {
       const fade = 1 - i / noiseLength;
-      data[i] = (Math.random() * 2 - 1) * fade * fade * 0.28;
+      data[i] = (Math.sin(i * 12.9898) * 43758.5453 % 1) * fade * fade * 0.28;
     }
     const noise = audioCtx.createBufferSource();
     const noiseGain = audioCtx.createGain();
@@ -1809,7 +1857,30 @@ function DefenseGameView({
     }, 1100);
   };
 
-  const renderPrompt = (item: WordItem) => {
+  const scoreWord = (matched: FallingWord, answerMs: number, x: number, y: number) => {
+    const speedWindow = Math.max(4200, 9500 - gameLevel * 450);
+    const speedRatio = Math.max(0, 1 - answerMs / speedWindow);
+    const speedBonus = Math.round(speedRatio * 90);
+    const wordPoints = matched.word.length * 10 + speedBonus + gameLevel * 8;
+    onHit();
+    onWordResult(matched.id, "correct", answerMs);
+    setSessionHits((old) => old + 1);
+    setSessionScore((old) => old + wordPoints);
+    setBestSpeedBonus((old) => Math.max(old, speedBonus));
+    showReward(`+${wordPoints}  FAST +${speedBonus}`, x, y + 2);
+    playLockSound();
+  };
+
+  const renderPrompt = (item: FallingWord) => {
+    if (item.cardKind === "answer") {
+      return <p className="font-black text-yellow-100">{item.word}</p>;
+    }
+    if (item.cardKind === "question" && settings.mode === "2-2") {
+      return <p className="text-[0.9em] text-cyan-100">{item.definitionZh}</p>;
+    }
+    if (item.cardKind === "question" && settings.mode === "3") {
+      return <p className="text-[0.8em] leading-snug text-cyan-100">{makeCloze(item.sentence, item.word)}</p>;
+    }
     if (settings.mode === "2-1") {
       return (
         <>
@@ -1833,28 +1904,62 @@ function DefenseGameView({
   };
 
   const onType = (value: string) => {
+    if (isMatchMode) return;
     setInput(value);
     const normalized = value.trim().toLowerCase();
     if (!normalized) return;
     const matched = falling.find((item) => !item.isHit && item.word.toLowerCase() === normalized);
     if (!matched) return;
-    const answerMs = Math.max(200, Date.now() - matched.bornAt);
-    const speedWindow = Math.max(4200, 9500 - gameLevel * 450);
-    const speedRatio = Math.max(0, 1 - answerMs / speedWindow);
-    const speedBonus = Math.round(speedRatio * 90);
-    const wordPoints = matched.word.length * 10 + speedBonus + gameLevel * 8;
+    const answerMs = Math.max(200, nowMs() - matched.bornAt);
     setFalling((prev) => prev.map((item) => (item.gameId === matched.gameId ? { ...item, isHit: true } : item)));
     setInput("");
-    onHit();
-    onWordResult(matched.id, "correct", answerMs);
-    setSessionHits((old) => old + 1);
-    setSessionScore((old) => old + wordPoints);
-    setBestSpeedBonus((old) => Math.max(old, speedBonus));
-    showReward(`+${wordPoints}  FAST +${speedBonus}`, matched.x, matched.y + 2);
-    playLockSound();
+    scoreWord(matched, answerMs, matched.x, matched.y);
     speakThen(matched.word, () => {
       setFalling((prev) => prev.filter((item) => item.gameId !== matched.gameId));
       burstAt(matched.x, matched.y + 6);
+      playExplosionSound();
+    });
+  };
+
+  const onDragStart = (gameId: string, event: React.PointerEvent<HTMLDivElement>) => {
+    if (!isMatchMode || phase !== "playing") return;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setFalling((prev) => prev.map((item) => (item.gameId === gameId ? { ...item, isDragging: true } : item)));
+  };
+
+  const onDragMove = (gameId: string, event: React.PointerEvent<HTMLDivElement>) => {
+    if (!isMatchMode || phase !== "playing") return;
+    const rect = playAreaRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const x = Math.max(8, Math.min(92, ((event.clientX - rect.left) / rect.width) * 100));
+    const y = Math.max(-8, Math.min(86, ((event.clientY - rect.top) / window.innerHeight) * 100));
+    setFalling((prev) => prev.map((item) => (item.gameId === gameId && item.isDragging ? { ...item, x, y } : item)));
+  };
+
+  const onDragEnd = (gameId: string) => {
+    if (!isMatchMode || phase !== "playing") return;
+    const dragged = falling.find((item) => item.gameId === gameId);
+    if (!dragged) return;
+    const match = falling.find(
+      (item) =>
+        item.gameId !== dragged.gameId &&
+        !item.isHit &&
+        item.pairId === dragged.pairId &&
+        item.cardKind !== dragged.cardKind &&
+        Math.abs(item.x - dragged.x) < 16 &&
+        Math.abs(item.y - dragged.y) < 12,
+    );
+    if (!match) {
+      setFalling((prev) => prev.map((item) => (item.gameId === gameId ? { ...item, isDragging: false } : item)));
+      return;
+    }
+    const answerMs = Math.max(200, nowMs() - Math.min(dragged.bornAt, match.bornAt));
+    const hitX = (dragged.x + match.x) / 2;
+    const hitY = (dragged.y + match.y) / 2;
+    setFalling((prev) => prev.filter((item) => item.pairId !== dragged.pairId));
+    scoreWord(dragged, answerMs, hitX, hitY);
+    speakThen(dragged.word, () => {
+      burstAt(hitX, hitY + 6);
       playExplosionSound();
     });
   };
@@ -1952,11 +2057,15 @@ function DefenseGameView({
         </div>
       </div>
 
-      <div className="relative min-h-0 flex-1">
+      <div ref={playAreaRef} className="relative min-h-0 flex-1">
         {falling.map((item) => (
           <div
             key={item.gameId}
-            className="absolute transition-transform duration-75"
+            onPointerDown={(event) => onDragStart(item.gameId, event)}
+            onPointerMove={(event) => onDragMove(item.gameId, event)}
+            onPointerUp={() => onDragEnd(item.gameId)}
+            onPointerCancel={() => onDragEnd(item.gameId)}
+            className={`absolute ${item.isDragging ? "z-30 cursor-grabbing touch-none" : isMatchMode ? "z-10 cursor-grab touch-none transition-transform duration-75" : "transition-transform duration-75"}`}
             style={{
               left: `${item.x}%`,
               transform: `translate(-50%, ${item.y}vh)`,
@@ -1967,7 +2076,9 @@ function DefenseGameView({
                 item.isHit
                   ? "scale-105 border-yellow-200 bg-yellow-300/95 text-slate-950 shadow-[0_0_34px_rgba(250,204,21,0.75)] [&_p]:!text-slate-950"
                   : item.lane === 0
-                    ? "border-cyan-300/70 bg-[#071833]/90 text-white"
+                    ? item.cardKind === "answer"
+                      ? "border-yellow-300/80 bg-[#302707]/90 text-white"
+                      : "border-cyan-300/70 bg-[#071833]/90 text-white"
                     : "border-fuchsia-300/70 bg-[#23072f]/90 text-white"
               }`}
               style={{ fontSize: `${settings.fontSize}px`, clipPath: "polygon(8% 0, 100% 0, 92% 100%, 0 100%)" }}
@@ -2053,7 +2164,7 @@ function DefenseGameView({
           </label>
         </div>
         <div className="mb-2 flex items-center justify-between text-xs text-slate-300">
-          <span>輸入正確英文即可擊落</span>
+          <span>{isMatchMode ? "拖拉題目卡與答案卡配對" : "輸入正確英文即可擊落"}</span>
           {(phase === "over" || phase === "clear") && (
             <button type="button" onClick={() => resetGame()} className="rounded-md bg-blue-600 px-2 py-1 text-white">
               重新開始
@@ -2064,8 +2175,8 @@ function DefenseGameView({
           ref={inputRef}
           value={input}
           onChange={(e) => onType(e.target.value)}
-          disabled={phase !== "playing"}
-          placeholder={phase === "over" ? "Game over" : phase === "clear" ? "Level clear" : phase === "ready" ? "Ready..." : "type answer..."}
+          disabled={phase !== "playing" || isMatchMode}
+          placeholder={isMatchMode ? "drag cards to match..." : phase === "over" ? "Game over" : phase === "clear" ? "Level clear" : phase === "ready" ? "Ready..." : "type answer..."}
           className="w-full rounded-md border-2 border-cyan-300/60 bg-slate-950 px-4 py-3 text-base font-semibold text-white shadow-[0_0_18px_rgba(0,229,255,0.18)] outline-none focus:ring-2 focus:ring-yellow-300 disabled:opacity-50"
         />
       </div>
