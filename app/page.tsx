@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   BarChart3,
   BookOpenText,
@@ -40,6 +40,41 @@ interface WordItem {
   note?: string;
   usage?: string[];
   examples?: string[];
+  mastery?: WordMastery;
+}
+
+interface WordMastery {
+  flashcardViews: number;
+  flashcardSpeaks: number;
+  lastFlashcardAt?: number;
+  gameSeen: number;
+  gameCorrect: number;
+  gameMissed: number;
+  totalAnswerMs: number;
+  bestAnswerMs?: number;
+  streak: number;
+  lastGameAt?: number;
+}
+
+interface MasterySnapshot {
+  score: number;
+  label: string;
+  flashcardScore: number;
+  accuracyScore: number;
+  speedScore: number;
+  retentionScore: number;
+  accuracyPct: number;
+  avgAnswerSeconds?: number;
+  dueText: string;
+}
+
+interface LearningBackup {
+  app: "English Hero";
+  version: 1;
+  exportedAt: string;
+  words: WordItem[];
+  stats: Stats;
+  gameSettings: GameSettings;
 }
 
 interface Stats {
@@ -84,6 +119,7 @@ interface RewardToast {
 
 const BLUE = "#2563eb";
 const STARTING_HP = 5;
+const LEVEL_MUSIC_OFFSETS = [0, 18, 36, 54];
 const LEVEL_THEMES = [
   {
     name: "Neon Grid",
@@ -117,6 +153,73 @@ function getLevelTimeLimit(level: number): number {
 
 function getLevelTheme(level: number) {
   return LEVEL_THEMES[(level - 1) % LEVEL_THEMES.length];
+}
+
+function emptyMastery(): WordMastery {
+  return {
+    flashcardViews: 0,
+    flashcardSpeaks: 0,
+    gameSeen: 0,
+    gameCorrect: 0,
+    gameMissed: 0,
+    totalAnswerMs: 0,
+    streak: 0,
+  };
+}
+
+function normalizeMastery(mastery?: Partial<WordMastery>): WordMastery {
+  return { ...emptyMastery(), ...mastery };
+}
+
+function getMasterySnapshot(word: WordItem, now = Date.now()): MasterySnapshot {
+  const mastery = normalizeMastery(word.mastery);
+  const flashcardScore = Math.min(20, mastery.flashcardViews * 3 + mastery.flashcardSpeaks * 2);
+  const accuracyPct = mastery.gameSeen > 0 ? Math.round((mastery.gameCorrect / mastery.gameSeen) * 100) : 0;
+  const accuracyScore = mastery.gameSeen > 0 ? Math.round((accuracyPct / 100) * 28) : 0;
+  const avgAnswerMs = mastery.gameCorrect > 0 ? mastery.totalAnswerMs / mastery.gameCorrect : undefined;
+  const avgAnswerSeconds = avgAnswerMs ? avgAnswerMs / 1000 : undefined;
+  const speedScore = avgAnswerMs ? Math.max(0, Math.round(20 - Math.min(20, ((avgAnswerMs - 1600) / 5200) * 20))) : 0;
+  const streakScore = Math.min(7, mastery.streak * 1.4);
+  const lastPracticeAt = Math.max(mastery.lastFlashcardAt || 0, mastery.lastGameAt || 0);
+  const daysSincePractice = lastPracticeAt ? (now - lastPracticeAt) / 86_400_000 : 999;
+  const successSignal = mastery.gameCorrect + mastery.flashcardViews * 0.35 + mastery.flashcardSpeaks * 0.2;
+  const reviewIntervalDays = Math.min(30, Math.max(0.35, 0.45 * 1.65 ** Math.min(8, successSignal)));
+  const retentionRatio = lastPracticeAt ? Math.exp(-daysSincePractice / reviewIntervalDays) : 0;
+  const retentionScore = Math.round(retentionRatio * 25);
+  const score = Math.max(0, Math.min(100, Math.round(flashcardScore + accuracyScore + speedScore + streakScore + retentionScore)));
+  const dueText =
+    !lastPracticeAt ? "尚未練習" : daysSincePractice >= reviewIntervalDays ? "建議複習" : `${Math.max(1, Math.ceil(reviewIntervalDays - daysSincePractice))}天後複習`;
+  const label = score >= 82 ? "穩固" : score >= 62 ? "熟悉" : score >= 38 ? "練習中" : "優先複習";
+
+  return {
+    score,
+    label,
+    flashcardScore,
+    accuracyScore,
+    speedScore,
+    retentionScore,
+    accuracyPct,
+    avgAnswerSeconds,
+    dueText,
+  };
+}
+
+function sortForPractice(words: WordItem[]): WordItem[] {
+  return [...words].sort((a, b) => getMasterySnapshot(a).score - getMasterySnapshot(b).score || a.word.localeCompare(b.word));
+}
+
+function pickWeightedWord(words: WordItem[]): WordItem {
+  const weighted = words.map((word) => {
+    const mastery = getMasterySnapshot(word);
+    return { word, weight: Math.max(1, 105 - mastery.score) };
+  });
+  const total = weighted.reduce((sum, item) => sum + item.weight, 0);
+  let roll = Math.random() * total;
+  for (const item of weighted) {
+    roll -= item.weight;
+    if (roll <= 0) return item.word;
+  }
+  return weighted[weighted.length - 1].word;
 }
 
 const PRELOAD_WORDS: Omit<WordItem, "id">[] = [
@@ -405,6 +508,7 @@ export default function EnglishHeroPage() {
     if (total === 0) return 0;
     return Math.round((stats.totalHits / total) * 100);
   }, [stats.totalHits, stats.totalMisses]);
+  const practiceWords = useMemo(() => sortForPractice(words), [words]);
 
   useEffect(() => {
     queueMicrotask(() => {
@@ -442,6 +546,68 @@ export default function EnglishHeroPage() {
 
   const updateWord = (wordId: string, patch: Partial<WordItem>) => {
     setWords((prev) => prev.map((w) => (w.id === wordId ? { ...w, ...patch } : w)));
+  };
+
+  const updateWordMastery = useCallback((wordId: string, updater: (current: WordMastery) => WordMastery) => {
+    setWords((prev) =>
+      prev.map((word) => (word.id === wordId ? { ...word, mastery: updater(normalizeMastery(word.mastery)) } : word)),
+    );
+  }, []);
+
+  const recordFlashcardStudy = useCallback((wordId: string, action: "view" | "speak") => {
+    updateWordMastery(wordId, (current) => ({
+      ...current,
+      flashcardViews: current.flashcardViews + (action === "view" ? 1 : 0),
+      flashcardSpeaks: current.flashcardSpeaks + (action === "speak" ? 1 : 0),
+      lastFlashcardAt: Date.now(),
+    }));
+  }, [updateWordMastery]);
+
+  const recordDefenseResult = useCallback((wordId: string, result: "correct" | "miss", answerMs?: number) => {
+    updateWordMastery(wordId, (current) => ({
+      ...current,
+      gameSeen: current.gameSeen + 1,
+      gameCorrect: current.gameCorrect + (result === "correct" ? 1 : 0),
+      gameMissed: current.gameMissed + (result === "miss" ? 1 : 0),
+      totalAnswerMs: current.totalAnswerMs + (result === "correct" ? answerMs || 0 : 0),
+      bestAnswerMs: result === "correct" ? Math.min(current.bestAnswerMs || Number.POSITIVE_INFINITY, answerMs || Number.POSITIVE_INFINITY) : current.bestAnswerMs,
+      streak: result === "correct" ? current.streak + 1 : 0,
+      lastGameAt: Date.now(),
+    }));
+  }, [updateWordMastery]);
+
+  const handleBackupLearningData = () => {
+    const backup: LearningBackup = {
+      app: "English Hero",
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      words,
+      stats,
+      gameSettings,
+    };
+    const blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    const stamp = new Date().toISOString().slice(0, 10);
+    link.href = url;
+    link.download = `english-hero-learning-backup-${stamp}.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleRestoreLearningData = async (file: File) => {
+    const backup = JSON.parse(await file.text()) as Partial<LearningBackup>;
+    if (!Array.isArray(backup.words)) return;
+    setWords(backup.words);
+    if (backup.stats) {
+      setStats({
+        totalHits: backup.stats.totalHits ?? 0,
+        totalMisses: backup.stats.totalMisses ?? 0,
+        totalPracticeSeconds: backup.stats.totalPracticeSeconds ?? 0,
+      });
+    }
+    if (backup.gameSettings) setGameSettings((prev) => ({ ...prev, ...backup.gameSettings }));
+    setActiveTab("lab");
   };
 
   const enrichFromDictionary = async (wordId: string, targetWord: string) => {
@@ -597,16 +763,19 @@ export default function EnglishHeroPage() {
             onAddWord={handleAddWord}
             onDeleteWord={(id) => setWords((prev) => prev.filter((w) => w.id !== id))}
             onDropImport={handleDropImport}
+            onBackupLearningData={handleBackupLearningData}
+            onRestoreLearningData={handleRestoreLearningData}
           />
         )}
-        {activeTab === "flashcard" && <FlashcardView words={words} />}
+        {activeTab === "flashcard" && <FlashcardView words={practiceWords} onStudyWord={recordFlashcardStudy} />}
         {activeTab === "game" && (
           <DefenseGameView
-            words={words}
+            words={practiceWords}
             settings={gameSettings}
             onChangeSettings={setGameSettings}
             onHit={() => setStats((prev) => ({ ...prev, totalHits: prev.totalHits + 1 }))}
             onMiss={() => setStats((prev) => ({ ...prev, totalMisses: prev.totalMisses + 1 }))}
+            onWordResult={recordDefenseResult}
           />
         )}
         {activeTab === "outcome" && (
@@ -652,18 +821,24 @@ function SmartLabView({
   onAddWord,
   onDeleteWord,
   onDropImport,
+  onBackupLearningData,
+  onRestoreLearningData,
 }: {
   words: WordItem[];
   onAddWord: (word: string, definitionZh: string, sentence: string) => Promise<void>;
   onDeleteWord: (id: string) => void;
   onDropImport: (file: File) => Promise<void>;
+  onBackupLearningData: () => void;
+  onRestoreLearningData: (file: File) => Promise<void>;
 }) {
   const [newWord, setNewWord] = useState("");
   const [newDefinition, setNewDefinition] = useState("");
   const [newSentence, setNewSentence] = useState("");
   const [isDragging, setIsDragging] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [expandedMasteryId, setExpandedMasteryId] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const restoreInputRef = useRef<HTMLInputElement | null>(null);
 
   const onSubmit = async () => {
     setIsSubmitting(true);
@@ -710,12 +885,40 @@ function SmartLabView({
         >
           選擇檔案匯入
         </button>
+        <div className="mt-3 grid grid-cols-2 gap-2">
+          <button
+            type="button"
+            onClick={onBackupLearningData}
+            className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-semibold text-blue-700"
+          >
+            備份學習紀錄
+          </button>
+          <button
+            type="button"
+            onClick={() => restoreInputRef.current?.click()}
+            className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700"
+          >
+            還原學習紀錄
+          </button>
+        </div>
         <input
           ref={fileInputRef}
           type="file"
           accept=".txt,.tsv,.csv,.json,.xlsx,.xls,text/plain,text/csv,application/json,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
           className="hidden"
           onChange={async (e) => importFiles(e.target.files)}
+        />
+        <input
+          ref={restoreInputRef}
+          type="file"
+          accept=".json,application/json"
+          className="hidden"
+          onChange={async (e) => {
+            const file = e.target.files?.[0];
+            if (!file) return;
+            await onRestoreLearningData(file);
+            e.target.value = "";
+          }}
         />
       </section>
 
@@ -753,39 +956,78 @@ function SmartLabView({
       </section>
 
       <section className="space-y-2">
-        {words.map((w) => (
+        {words.map((w) => {
+          const mastery = getMasterySnapshot(w);
+          const details = normalizeMastery(w.mastery);
+          return (
           <article key={w.id} className="rounded-xl border border-slate-200 bg-white p-3 shadow-sm">
             <div className="flex items-start justify-between gap-2">
-              <div>
+              <div className="min-w-0">
                 <p className="text-base font-semibold text-slate-900">{w.word}</p>
                 <p className="text-xs text-slate-500">
                   {w.ipa} · {w.pos}
                 </p>
                 <p className="mt-1 text-sm text-blue-700">{w.definitionZh}</p>
               </div>
-              <button
-                type="button"
-                onClick={() => onDeleteWord(w.id)}
-                className="rounded-lg p-1.5 text-slate-400 transition hover:bg-red-50 hover:text-red-500"
-              >
-                <Trash2 size={16} />
-              </button>
+              <div className="flex shrink-0 items-start gap-2">
+                <button
+                  type="button"
+                  onClick={() => setExpandedMasteryId((current) => (current === w.id ? null : w.id))}
+                  className="rounded-lg border border-blue-100 bg-blue-50 px-2 py-1 text-right"
+                >
+                  <span className="block text-[10px] font-semibold text-blue-500">熟練度</span>
+                  <span className="block text-lg font-black leading-none text-blue-700">{mastery.score}</span>
+                  <span className="block text-[10px] text-blue-500">{mastery.label}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onDeleteWord(w.id)}
+                  className="rounded-lg p-1.5 text-slate-400 transition hover:bg-red-50 hover:text-red-500"
+                >
+                  <Trash2 size={16} />
+                </button>
+              </div>
             </div>
+            {expandedMasteryId === w.id && (
+              <div className="mt-3 grid grid-cols-2 gap-2 rounded-lg bg-slate-50 p-3 text-xs text-slate-600">
+                <p>Flashcard：{details.flashcardViews} 次</p>
+                <p>發音：{details.flashcardSpeaks} 次</p>
+                <p>Defense 正確：{details.gameCorrect}</p>
+                <p>Defense 錯過：{details.gameMissed}</p>
+                <p>答題正確率：{mastery.accuracyPct}%</p>
+                <p>平均速度：{mastery.avgAnswerSeconds ? `${mastery.avgAnswerSeconds.toFixed(1)}s` : "尚無"}</p>
+                <p>記憶保留：{mastery.retentionScore}/25</p>
+                <p>{mastery.dueText}</p>
+              </div>
+            )}
           </article>
-        ))}
+          );
+        })}
       </section>
     </div>
   );
 }
 
-function FlashcardView({ words }: { words: WordItem[] }) {
+function FlashcardView({ words, onStudyWord }: { words: WordItem[]; onStudyWord: (wordId: string, action: "view" | "speak") => void }) {
   const [index, setIndex] = useState(0);
   const [flipped, setFlipped] = useState(false);
+  const viewedThisSessionRef = useRef<Set<string>>(new Set());
   const current = words[index];
+  const currentId = current?.id;
 
   useEffect(() => {
     queueMicrotask(() => setIndex((prev) => (words.length === 0 ? 0 : prev % words.length)));
   }, [words.length]);
+
+  useEffect(() => {
+    if (!currentId) return;
+    if (viewedThisSessionRef.current.has(currentId)) return;
+    const timer = window.setTimeout(() => {
+      viewedThisSessionRef.current.add(currentId);
+      onStudyWord(currentId, "view");
+    }, 350);
+    return () => window.clearTimeout(timer);
+  }, [currentId, onStudyWord]);
 
   if (!current) return <EmptyView title="尚無單字" description="請先到 Smart Lab 匯入或新增單字。" />;
 
@@ -796,6 +1038,7 @@ function FlashcardView({ words }: { words: WordItem[] }) {
 
   const speakWord = () => {
     if (typeof window === "undefined" || !window.speechSynthesis) return;
+    onStudyWord(current.id, "speak");
     const utterance = new SpeechSynthesisUtterance(current.word);
     utterance.lang = "en-US";
     utterance.rate = 0.95;
@@ -912,12 +1155,14 @@ function DefenseGameView({
   onChangeSettings,
   onHit,
   onMiss,
+  onWordResult,
 }: {
   words: WordItem[];
   settings: GameSettings;
   onChangeSettings: (next: GameSettings) => void;
   onHit: () => void;
   onMiss: () => void;
+  onWordResult: (wordId: string, result: "correct" | "miss", answerMs?: number) => void;
 }) {
   const [falling, setFalling] = useState<FallingWord[]>([]);
   const [input, setInput] = useState("");
@@ -973,9 +1218,21 @@ function DefenseGameView({
     gameLevelRef.current = gameLevel;
     if (bgmAudioRef.current && phase === "playing") {
       bgmAudioRef.current.volume = Math.min(0.52, 0.34 + (STARTING_HP - hp) * 0.025 + timeUrgency * 0.08);
-      bgmAudioRef.current.playbackRate = Math.min(1.38, 0.96 + timeUrgency * 0.32 + gameLevel * 0.015);
+      bgmAudioRef.current.playbackRate = Math.min(1.22, 0.98 + timeUrgency * 0.14 + gameLevel * 0.008);
     }
   }, [gameLevel, hp, phase, timeUrgency]);
+
+  useEffect(() => {
+    const bgm = bgmAudioRef.current;
+    if (!bgm) return;
+    const offset = LEVEL_MUSIC_OFFSETS[(gameLevel - 1) % LEVEL_MUSIC_OFFSETS.length];
+    const safeOffset = bgm.duration && Number.isFinite(bgm.duration) ? Math.min(offset, Math.max(0, bgm.duration - 8)) : offset;
+    try {
+      bgm.currentTime = safeOffset;
+    } catch {
+      // Some browsers only allow seeking after metadata is loaded.
+    }
+  }, [gameLevel]);
 
   useEffect(() => {
     const readyTimer = window.setTimeout(() => setReadyText("Go!"), 700);
@@ -1022,7 +1279,7 @@ function DefenseGameView({
   useEffect(() => {
     if (!words.length || phase !== "playing" || hp <= 0) return;
     const spawn = window.setInterval(() => {
-      const pick = words[Math.floor(Math.random() * words.length)];
+      const pick = pickWeightedWord(words);
       setFalling((prev) => {
         const openLanes = lanes.filter((lane, idx) => !prev.some((item) => item.lane === idx && item.y < 30));
         if (!openLanes.length) return prev;
@@ -1049,12 +1306,15 @@ function DefenseGameView({
       setFalling((prev) => {
         const moved = prev.map((item) => (item.isHit ? item : { ...item, y: item.y + settings.speed }));
         const alive = moved.filter((item) => item.y < 92);
-        const missedCount = moved.filter((item) => !item.isHit).length - alive.filter((item) => !item.isHit).length;
-        if (missedCount > 0) {
+        const missedItems = moved.filter((item) => !item.isHit && item.y >= 92);
+        if (missedItems.length > 0) {
           window.setTimeout(() => {
-            Array.from({ length: missedCount }).forEach(() => onMiss());
-            setHp((old) => Math.max(0, old - missedCount));
-            setSessionMisses((old) => old + missedCount);
+            missedItems.forEach((item) => {
+              onMiss();
+              onWordResult(item.id, "miss");
+            });
+            setHp((old) => Math.max(0, old - missedItems.length));
+            setSessionMisses((old) => old + missedItems.length);
           }, 0);
         }
         return alive;
@@ -1076,7 +1336,7 @@ function DefenseGameView({
     return () => {
       if (rafRef.current) window.cancelAnimationFrame(rafRef.current);
     };
-  }, [settings.speed, onMiss, phase]);
+  }, [settings.speed, onMiss, onWordResult, phase]);
 
   useEffect(() => {
     if (!musicEnabled || phase !== "playing" || hp <= 0) {
@@ -1091,7 +1351,7 @@ function DefenseGameView({
       if (!audioCtx || !musicEnabled || phase !== "playing" || hp <= 0) return;
       const now = audioCtx.currentTime;
       const step = beatStepRef.current;
-      const bpm = 132 + (STARTING_HP - hp) * 8 + timeUrgencyRef.current * 48 + gameLevelRef.current * 3;
+      const bpm = 132 + (STARTING_HP - hp) * 6 + timeUrgencyRef.current * 24 + gameLevelRef.current * 2;
       const sixteenthMs = Math.round(60000 / bpm / 4);
       const melody = [392, 523.25, 659.25, 783.99, 987.77, 880, 783.99, 659.25, 440, 587.33, 739.99, 987.77, 1174.66, 987.77, 739.99, 587.33];
       const bass = [98, 98, 130.81, 98, 146.83, 146.83, 130.81, 110];
@@ -1160,7 +1420,7 @@ function DefenseGameView({
     const bgm = bgmAudioRef.current;
     if (bgm) {
       bgm.volume = Math.min(0.52, 0.34 + (STARTING_HP - hp) * 0.025 + timeUrgencyRef.current * 0.08);
-      bgm.playbackRate = Math.min(1.38, 0.96 + timeUrgencyRef.current * 0.32 + gameLevelRef.current * 0.015);
+      bgm.playbackRate = Math.min(1.22, 0.98 + timeUrgencyRef.current * 0.14 + gameLevelRef.current * 0.008);
       void bgm.play().catch(() => playBeat());
       return () => {
         bgm.pause();
@@ -1389,6 +1649,7 @@ function DefenseGameView({
     setFalling((prev) => prev.map((item) => (item.gameId === matched.gameId ? { ...item, isHit: true } : item)));
     setInput("");
     onHit();
+    onWordResult(matched.id, "correct", answerMs);
     setSessionHits((old) => old + 1);
     setSessionScore((old) => old + wordPoints);
     setBestSpeedBonus((old) => Math.max(old, speedBonus));
