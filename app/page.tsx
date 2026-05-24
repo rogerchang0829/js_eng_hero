@@ -120,9 +120,39 @@ interface RewardToast {
   y: number;
 }
 
+interface AnswerOption {
+  optionId: string;
+  wordId?: string;
+  word: string;
+  isDistractor?: boolean;
+}
+
+interface DraggingAnswer extends AnswerOption {
+  x: number;
+  y: number;
+}
+
 const BLUE = "#2563eb";
 const STARTING_HP = 5;
 const LEVEL_MUSIC_OFFSETS = [0, 18, 36, 54];
+const DISTRACTOR_ANSWERS = [
+  "timeline",
+  "brief",
+  "scope",
+  "asset",
+  "metric",
+  "policy",
+  "launch",
+  "archive",
+  "ticket",
+  "review",
+  "option",
+  "signal",
+  "sample",
+  "target",
+  "update",
+  "studio",
+];
 const LEVEL_THEMES = [
   {
     name: "Neon Grid",
@@ -507,6 +537,18 @@ function secondsToClock(total: number): string {
 
 function nowMs(): number {
   return Date.now();
+}
+
+function hashText(value: string): number {
+  let hash = 0;
+  for (let idx = 0; idx < value.length; idx += 1) {
+    hash = (hash * 31 + value.charCodeAt(idx)) % 1_000_003;
+  }
+  return hash;
+}
+
+function shuffleByKey<T extends { optionId: string }>(items: T[], salt: string): T[] {
+  return [...items].sort((a, b) => hashText(`${salt}_${a.optionId}`) - hashText(`${salt}_${b.optionId}`));
 }
 
 export default function EnglishHeroPage() {
@@ -1371,6 +1413,7 @@ function DefenseGameView({
   const [bestSpeedBonus, setBestSpeedBonus] = useState(0);
   const [particles, setParticles] = useState<HitParticle[]>([]);
   const [rewards, setRewards] = useState<RewardToast[]>([]);
+  const [draggingAnswer, setDraggingAnswer] = useState<DraggingAnswer | null>(null);
   const rafRef = useRef<number | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const playAreaRef = useRef<HTMLDivElement | null>(null);
@@ -1383,8 +1426,26 @@ function DefenseGameView({
   const wordsRef = useRef(words);
   const singleLevelQueueRef = useRef<WordItem[]>([]);
   const isMatchMode = settings.mode === "2-2" || settings.mode === "3";
-  const lanes = useMemo(() => (isMatchMode ? [16, 38, 62, 84] : [28, 72]), [isMatchMode]);
+  const lanes = useMemo(() => (isMatchMode ? [18, 42, 66, 88] : [28, 72]), [isMatchMode]);
   const wordIdsKey = useMemo(() => words.map((word) => word.id).join("|"), [words]);
+  const answerOptions = useMemo<AnswerOption[]>(() => {
+    if (!isMatchMode) return [];
+    const existingWords = new Set(words.map((word) => word.word.toLowerCase()));
+    const validOptions = words.map((word) => ({
+      optionId: `answer_${word.id}`,
+      wordId: word.id,
+      word: word.word,
+    }));
+    const distractorCount = Math.min(5, Math.max(2, Math.ceil(words.length * 0.3)));
+    const distractors = DISTRACTOR_ANSWERS.filter((word) => !existingWords.has(word.toLowerCase()))
+      .slice(0, distractorCount)
+      .map((word, idx) => ({
+        optionId: `distractor_${settings.mode}_${idx}_${word}`,
+        word,
+        isDistractor: true,
+      }));
+    return shuffleByKey([...validOptions, ...distractors], `${settings.mode}_${wordIdsKey}`);
+  }, [isMatchMode, settings.mode, wordIdsKey, words]);
   const levelGoal = singleLevel ? Math.max(words.length + 1, Math.ceil(words.length * 1.35)) : getLevelGoal(gameLevel);
   const levelTimeLimit = singleLevel ? Math.max(45, words.length * 7) : getLevelTimeLimit(gameLevel);
   const timeUrgency = 1 - timeRemaining / levelTimeLimit;
@@ -1492,31 +1553,17 @@ function DefenseGameView({
       setFalling((prev) => {
         const openLanes = lanes.filter((lane, idx) => !prev.some((item) => item.lane === idx && item.y < 30));
         if (isMatchMode) {
-          if (openLanes.length < 2) return prev;
-          const shuffled = [...openLanes].sort(() => Math.random() - 0.5);
-          const questionLaneIndex = lanes.indexOf(shuffled[0]);
-          const answerLaneIndex = lanes.indexOf(shuffled[1]);
-          const pairId = makeId();
+          if (!openLanes.length) return prev;
+          const laneIndex = lanes.indexOf(openLanes[Math.floor(Math.random() * openLanes.length)]);
           return [
             ...prev,
             {
               ...pick,
               gameId: makeId(),
-              pairId,
               cardKind: "question",
-              x: lanes[questionLaneIndex],
+              x: lanes[laneIndex],
               y: -12,
-              lane: questionLaneIndex,
-              bornAt: nowMs(),
-            },
-            {
-              ...pick,
-              gameId: makeId(),
-              pairId,
-              cardKind: "answer",
-              x: lanes[answerLaneIndex],
-              y: -12,
-              lane: answerLaneIndex,
+              lane: laneIndex,
               bornAt: nowMs(),
             },
           ];
@@ -1872,9 +1919,6 @@ function DefenseGameView({
   };
 
   const renderPrompt = (item: FallingWord) => {
-    if (item.cardKind === "answer") {
-      return <p className="font-black text-yellow-100">{item.word}</p>;
-    }
     if (item.cardKind === "question" && settings.mode === "2-2") {
       return <p className="text-[0.9em] text-cyan-100">{item.definitionZh}</p>;
     }
@@ -1921,44 +1965,51 @@ function DefenseGameView({
     });
   };
 
-  const onDragStart = (gameId: string, event: React.PointerEvent<HTMLDivElement>) => {
+  const getPointerPosition = (event: React.PointerEvent<HTMLElement>) => {
+    const rect = playAreaRef.current?.getBoundingClientRect();
+    if (!rect) return null;
+    return {
+      x: Math.max(6, Math.min(94, ((event.clientX - rect.left) / rect.width) * 100)),
+      y: Math.max(-8, Math.min(90, ((event.clientY - rect.top) / window.innerHeight) * 100)),
+    };
+  };
+
+  const onAnswerDragStart = (option: AnswerOption, event: React.PointerEvent<HTMLButtonElement>) => {
     if (!isMatchMode || phase !== "playing") return;
     event.currentTarget.setPointerCapture(event.pointerId);
-    setFalling((prev) => prev.map((item) => (item.gameId === gameId ? { ...item, isDragging: true } : item)));
+    const position = getPointerPosition(event);
+    if (!position) return;
+    setDraggingAnswer({ ...option, ...position });
   };
 
-  const onDragMove = (gameId: string, event: React.PointerEvent<HTMLDivElement>) => {
+  const onAnswerDragMove = (event: React.PointerEvent<HTMLButtonElement>) => {
     if (!isMatchMode || phase !== "playing") return;
-    const rect = playAreaRef.current?.getBoundingClientRect();
-    if (!rect) return;
-    const x = Math.max(8, Math.min(92, ((event.clientX - rect.left) / rect.width) * 100));
-    const y = Math.max(-8, Math.min(86, ((event.clientY - rect.top) / window.innerHeight) * 100));
-    setFalling((prev) => prev.map((item) => (item.gameId === gameId && item.isDragging ? { ...item, x, y } : item)));
+    const position = getPointerPosition(event);
+    if (!position) return;
+    setDraggingAnswer((current) => (current ? { ...current, ...position } : current));
   };
 
-  const onDragEnd = (gameId: string) => {
+  const onAnswerDragEnd = (event: React.PointerEvent<HTMLButtonElement>) => {
     if (!isMatchMode || phase !== "playing") return;
-    const dragged = falling.find((item) => item.gameId === gameId);
-    if (!dragged) return;
+    const dragged = draggingAnswer;
+    const position = getPointerPosition(event);
+    setDraggingAnswer(null);
+    if (!dragged || !position || dragged.isDistractor || !dragged.wordId) return;
     const match = falling.find(
       (item) =>
-        item.gameId !== dragged.gameId &&
         !item.isHit &&
-        item.pairId === dragged.pairId &&
-        item.cardKind !== dragged.cardKind &&
-        Math.abs(item.x - dragged.x) < 16 &&
-        Math.abs(item.y - dragged.y) < 12,
+        item.cardKind === "question" &&
+        item.id === dragged.wordId &&
+        Math.abs(item.x - position.x) < 18 &&
+        Math.abs(item.y - position.y) < 14,
     );
-    if (!match) {
-      setFalling((prev) => prev.map((item) => (item.gameId === gameId ? { ...item, isDragging: false } : item)));
-      return;
-    }
-    const answerMs = Math.max(200, nowMs() - Math.min(dragged.bornAt, match.bornAt));
-    const hitX = (dragged.x + match.x) / 2;
-    const hitY = (dragged.y + match.y) / 2;
-    setFalling((prev) => prev.filter((item) => item.pairId !== dragged.pairId));
-    scoreWord(dragged, answerMs, hitX, hitY);
-    speakThen(dragged.word, () => {
+    if (!match) return;
+    const answerMs = Math.max(200, nowMs() - match.bornAt);
+    const hitX = (position.x + match.x) / 2;
+    const hitY = (position.y + match.y) / 2;
+    setFalling((prev) => prev.filter((item) => item.gameId !== match.gameId));
+    scoreWord(match, answerMs, hitX, hitY);
+    speakThen(match.word, () => {
       burstAt(hitX, hitY + 6);
       playExplosionSound();
     });
@@ -2061,11 +2112,7 @@ function DefenseGameView({
         {falling.map((item) => (
           <div
             key={item.gameId}
-            onPointerDown={(event) => onDragStart(item.gameId, event)}
-            onPointerMove={(event) => onDragMove(item.gameId, event)}
-            onPointerUp={() => onDragEnd(item.gameId)}
-            onPointerCancel={() => onDragEnd(item.gameId)}
-            className={`absolute ${item.isDragging ? "z-30 cursor-grabbing touch-none" : isMatchMode ? "z-10 cursor-grab touch-none transition-transform duration-75" : "transition-transform duration-75"}`}
+            className="absolute z-10 transition-transform duration-75"
             style={{
               left: `${item.x}%`,
               transform: `translate(-50%, ${item.y}vh)`,
@@ -2076,9 +2123,7 @@ function DefenseGameView({
                 item.isHit
                   ? "scale-105 border-yellow-200 bg-yellow-300/95 text-slate-950 shadow-[0_0_34px_rgba(250,204,21,0.75)] [&_p]:!text-slate-950"
                   : item.lane === 0
-                    ? item.cardKind === "answer"
-                      ? "border-yellow-300/80 bg-[#302707]/90 text-white"
-                      : "border-cyan-300/70 bg-[#071833]/90 text-white"
+                    ? "border-cyan-300/70 bg-[#071833]/90 text-white"
                     : "border-fuchsia-300/70 bg-[#23072f]/90 text-white"
               }`}
               style={{ fontSize: `${settings.fontSize}px`, clipPath: "polygon(8% 0, 100% 0, 92% 100%, 0 100%)" }}
@@ -2089,6 +2134,20 @@ function DefenseGameView({
             </div>
           </div>
         ))}
+        {draggingAnswer && (
+          <div
+            className="pointer-events-none absolute z-30"
+            style={{
+              left: `${draggingAnswer.x}%`,
+              top: `${draggingAnswer.y}vh`,
+              transform: "translate(-50%, -50%)",
+            }}
+          >
+            <div className="min-w-[112px] border-2 border-yellow-200 bg-[#312607]/95 px-3 py-2 text-center font-black text-yellow-100 shadow-[0_0_24px_rgba(250,204,21,0.42)] backdrop-blur">
+              {draggingAnswer.word}
+            </div>
+          </div>
+        )}
         <div className="pointer-events-none absolute inset-x-0 bottom-0 flex h-12 items-end justify-around opacity-90">
           {Array.from({ length: 13 }).map((_, idx) => (
             <span
@@ -2125,6 +2184,35 @@ function DefenseGameView({
       </div>
 
       <div className="relative z-20 border-t-2 border-cyan-300/35 bg-[#09051d]/92 p-4 pb-[max(env(safe-area-inset-bottom),1rem)] shadow-[0_-12px_32px_rgba(0,229,255,0.12)] backdrop-blur">
+        {isMatchMode && (
+          <div className="mb-3 rounded-md border border-yellow-300/30 bg-slate-950/72 p-2 shadow-[0_0_18px_rgba(250,204,21,0.12)]">
+            <div className="mb-2 flex items-center justify-between text-xs text-yellow-100">
+              <span className="font-bold">答案卡</span>
+              <span className="text-slate-300">拖到上方正確題目卡</span>
+            </div>
+            <div className="flex max-h-28 flex-wrap gap-2 overflow-y-auto pr-1">
+              {answerOptions.map((option) => (
+                <button
+                  key={option.optionId}
+                  type="button"
+                  onPointerDown={(event) => onAnswerDragStart(option, event)}
+                  onPointerMove={onAnswerDragMove}
+                  onPointerUp={onAnswerDragEnd}
+                  onPointerCancel={() => setDraggingAnswer(null)}
+                  className={`touch-none border-2 px-3 py-1.5 text-sm font-black shadow-[0_0_14px_rgba(250,204,21,0.18)] transition ${
+                    draggingAnswer?.optionId === option.optionId
+                      ? "scale-95 border-yellow-100 bg-yellow-300/30 text-yellow-50 opacity-50"
+                      : option.isDistractor
+                        ? "border-white/20 bg-slate-900/88 text-slate-300"
+                        : "border-yellow-300/60 bg-[#2a2109]/92 text-yellow-100 hover:border-yellow-100"
+                  }`}
+                >
+                  {option.word}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
         <div className="mb-3 grid grid-cols-3 gap-2 text-xs">
           <label className="block rounded-md border border-cyan-300/25 bg-slate-950/70 p-2">
             落下速度 {settings.speed.toFixed(3)}
@@ -2164,7 +2252,7 @@ function DefenseGameView({
           </label>
         </div>
         <div className="mb-2 flex items-center justify-between text-xs text-slate-300">
-          <span>{isMatchMode ? "拖拉題目卡與答案卡配對" : "輸入正確英文即可擊落"}</span>
+          <span>{isMatchMode ? "拖拉下方答案卡配對掉落題目" : "輸入正確英文即可擊落"}</span>
           {(phase === "over" || phase === "clear") && (
             <button type="button" onClick={() => resetGame()} className="rounded-md bg-blue-600 px-2 py-1 text-white">
               重新開始
