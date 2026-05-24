@@ -48,12 +48,16 @@ interface GameSettings {
   speed: number;
   spawnMs: number;
   mode: GameMode;
+  fontSize: number;
 }
 
 interface FallingWord extends WordItem {
   gameId: string;
   x: number;
   y: number;
+  lane: number;
+  bornAt: number;
+  isHit?: boolean;
 }
 
 interface HitParticle {
@@ -316,9 +320,14 @@ function parseDelimitedRows(text: string, delimiter: "," | "\t"): Omit<WordItem,
 
 function buildHint(word: string): string {
   if (word.length <= 2) return word;
+  const visibleCount = Math.max(2, Math.ceil(word.length / 3));
+  const revealed = new Set<number>([0, word.length - 1]);
+  for (let idx = 1; revealed.size < visibleCount && idx < word.length - 1; idx += 2) {
+    revealed.add(idx);
+  }
   return word
     .split("")
-    .map((ch, idx) => (idx === 0 || idx === word.length - 1 ? ch : "_"))
+    .map((ch, idx) => (revealed.has(idx) || /[^a-zA-Z]/.test(ch) ? ch : "_"))
     .join(" ");
 }
 
@@ -343,7 +352,7 @@ export default function EnglishHeroPage() {
   const [activeTab, setActiveTab] = useState<Tab>("lab");
   const [words, setWords] = useState<WordItem[]>([]);
   const [stats, setStats] = useState<Stats>({ totalHits: 0, totalMisses: 0, totalPracticeSeconds: 0 });
-  const [gameSettings, setGameSettings] = useState<GameSettings>({ speed: 0.12, spawnMs: 2200, mode: "2-1" });
+  const [gameSettings, setGameSettings] = useState<GameSettings>({ speed: 0.12, spawnMs: 2200, mode: "2-1", fontSize: 13 });
   const [isHydrated, setIsHydrated] = useState(false);
 
   const accuracy = useMemo(() => {
@@ -353,18 +362,22 @@ export default function EnglishHeroPage() {
   }, [stats.totalHits, stats.totalMisses]);
 
   useEffect(() => {
-    const savedWordsRaw = localStorage.getItem("eh_v2_words");
-    const savedStatsRaw = localStorage.getItem("eh_v2_stats");
-    const savedSettingsRaw = localStorage.getItem("eh_v2_game_settings");
+    queueMicrotask(() => {
+      const savedWordsRaw = localStorage.getItem("eh_v2_words");
+      const savedStatsRaw = localStorage.getItem("eh_v2_stats");
+      const savedSettingsRaw = localStorage.getItem("eh_v2_game_settings");
 
-    if (savedWordsRaw) {
-      setWords(JSON.parse(savedWordsRaw));
-    } else {
-      setWords(toWordItems(PRELOAD_WORDS));
-    }
-    if (savedStatsRaw) setStats(JSON.parse(savedStatsRaw));
-    if (savedSettingsRaw) setGameSettings(JSON.parse(savedSettingsRaw));
-    setIsHydrated(true);
+      if (savedWordsRaw) {
+        setWords(JSON.parse(savedWordsRaw));
+      } else {
+        setWords(toWordItems(PRELOAD_WORDS));
+      }
+      if (savedStatsRaw) setStats(JSON.parse(savedStatsRaw));
+      if (savedSettingsRaw) {
+        setGameSettings((prev) => ({ ...prev, ...JSON.parse(savedSettingsRaw) }));
+      }
+      setIsHydrated(true);
+    });
   }, []);
 
   useEffect(() => {
@@ -726,7 +739,7 @@ function FlashcardView({ words }: { words: WordItem[] }) {
   const current = words[index];
 
   useEffect(() => {
-    setIndex((prev) => (words.length === 0 ? 0 : prev % words.length));
+    queueMicrotask(() => setIndex((prev) => (words.length === 0 ? 0 : prev % words.length)));
   }, [words.length]);
 
   if (!current) return <EmptyView title="尚無單字" description="請先到 Smart Lab 匯入或新增單字。" />;
@@ -798,7 +811,7 @@ function FlashcardView({ words }: { words: WordItem[] }) {
 
               <section className="rounded-xl bg-white/10 p-3">
                 <p className="text-xs font-semibold text-blue-100">Examples</p>
-                {current.sentence && <p className="mt-1 text-sm leading-6 text-blue-50">"{current.sentence}"</p>}
+                {current.sentence && <p className="mt-1 text-sm leading-6 text-blue-50">&quot;{current.sentence}&quot;</p>}
                 {current.sentenceZh && <p className="mt-1 text-sm leading-6 text-blue-100">{current.sentenceZh}</p>}
                 {exampleLines.map((line, idx) => (
                   <p key={`${line}_${idx}`} className="mt-1 text-sm leading-5 text-blue-100">
@@ -874,7 +887,10 @@ function DefenseGameView({
   const rafRef = useRef<number | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
+  const bgmAudioRef = useRef<HTMLAudioElement | null>(null);
   const bgmTimerRef = useRef<number | null>(null);
+  const beatStepRef = useRef(0);
+  const lanes = useMemo(() => [28, 72], []);
 
   const getAudioContext = () => {
     if (typeof window === "undefined") return null;
@@ -883,8 +899,20 @@ function DefenseGameView({
   };
 
   useEffect(() => {
-    setReadyText("Ready");
-    setPhase("ready");
+    if (typeof window === "undefined") return;
+    const bgm = new Audio("/audio/defense-bgm.ogg");
+    bgm.loop = true;
+    bgm.preload = "auto";
+    bgm.volume = 0.42;
+    bgmAudioRef.current = bgm;
+
+    return () => {
+      bgm.pause();
+      bgmAudioRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
     const readyTimer = window.setTimeout(() => setReadyText("Go!"), 700);
     const goTimer = window.setTimeout(() => {
       setPhase("playing");
@@ -897,35 +925,44 @@ function DefenseGameView({
   }, []);
 
   useEffect(() => {
-    if (hp <= 0 && phase !== "over") setPhase("over");
+    if (hp > 0 || phase !== "playing") return;
+    const overTimer = window.setTimeout(() => setPhase("over"), 0);
+    return () => window.clearTimeout(overTimer);
   }, [hp, phase]);
 
   useEffect(() => {
     if (!words.length || phase !== "playing" || hp <= 0) return;
     const spawn = window.setInterval(() => {
       const pick = words[Math.floor(Math.random() * words.length)];
-      setFalling((prev) => [
-        ...prev,
-        {
-          ...pick,
-          gameId: makeId(),
-          x: 17 + Math.random() * 66,
-          y: -12,
-        },
-      ]);
+      setFalling((prev) => {
+        const openLanes = lanes.filter((lane, idx) => !prev.some((item) => item.lane === idx && item.y < 30));
+        if (!openLanes.length) return prev;
+        const laneIndex = lanes.indexOf(openLanes[Math.floor(Math.random() * openLanes.length)]);
+        return [
+          ...prev,
+          {
+            ...pick,
+            gameId: makeId(),
+            x: lanes[laneIndex],
+            y: -12,
+            lane: laneIndex,
+            bornAt: Date.now(),
+          },
+        ];
+      });
     }, settings.spawnMs);
     return () => window.clearInterval(spawn);
-  }, [words, settings.spawnMs, hp, phase]);
+  }, [words, settings.spawnMs, hp, phase, lanes]);
 
   useEffect(() => {
     if (phase !== "playing") return;
     const tick = () => {
       setFalling((prev) => {
-        const moved = prev.map((item) => ({ ...item, y: item.y + settings.speed }));
+        const moved = prev.map((item) => (item.isHit ? item : { ...item, y: item.y + settings.speed }));
         const alive = moved.filter((item) => item.y < 92);
-        const missedCount = moved.length - alive.length;
+        const missedCount = moved.filter((item) => !item.isHit).length - alive.filter((item) => !item.isHit).length;
         if (missedCount > 0) {
-          onMiss();
+          Array.from({ length: missedCount }).forEach(() => onMiss());
           setHp((old) => Math.max(0, old - missedCount));
           setSessionMisses((old) => old + missedCount);
         }
@@ -952,6 +989,7 @@ function DefenseGameView({
 
   useEffect(() => {
     if (!musicEnabled || phase !== "playing" || hp <= 0) {
+      bgmAudioRef.current?.pause();
       if (bgmTimerRef.current) window.clearTimeout(bgmTimerRef.current);
       bgmTimerRef.current = null;
       return;
@@ -961,24 +999,85 @@ function DefenseGameView({
       const audioCtx = getAudioContext();
       if (!audioCtx || !musicEnabled || phase !== "playing" || hp <= 0) return;
       const now = audioCtx.currentTime;
-      const notes = [523.25, 659.25, 783.99, 659.25];
-      const idx = Math.floor(Math.random() * notes.length);
-      const osc = audioCtx.createOscillator();
-      const gain = audioCtx.createGain();
-      osc.type = "sine";
-      osc.frequency.value = notes[idx];
-      gain.gain.value = 0.0001;
-      osc.connect(gain);
-      gain.connect(audioCtx.destination);
-      gain.gain.exponentialRampToValueAtTime(0.035, now + 0.01);
-      gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.14);
-      osc.start(now);
-      osc.stop(now + 0.16);
+      const step = beatStepRef.current;
+      const bpm = 136 + (STARTING_HP - hp) * 10;
+      const sixteenthMs = Math.round(60000 / bpm / 4);
+      const melody = [392, 523.25, 659.25, 783.99, 987.77, 880, 783.99, 659.25, 440, 587.33, 739.99, 987.77, 1174.66, 987.77, 739.99, 587.33];
+      const bass = [98, 98, 130.81, 98, 146.83, 146.83, 130.81, 110];
+      const note = melody[step % melody.length];
 
-      const bpm = 88 + (STARTING_HP - hp) * 18;
-      const msPerBeat = Math.max(220, Math.round((60 / bpm) * 1000));
-      bgmTimerRef.current = window.setTimeout(playBeat, msPerBeat);
+      const playTone = (
+        frequency: number,
+        start: number,
+        duration: number,
+        type: OscillatorType,
+        volume: number,
+        destination: AudioNode = audioCtx.destination,
+      ) => {
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = type;
+        osc.frequency.value = frequency;
+        gain.gain.value = 0.0001;
+        osc.connect(gain);
+        gain.connect(destination);
+        gain.gain.exponentialRampToValueAtTime(volume, start + 0.01);
+        gain.gain.exponentialRampToValueAtTime(0.0001, start + duration);
+        osc.start(start);
+        osc.stop(start + duration + 0.02);
+      };
+
+      const playNoise = (start: number, duration: number, volume: number, brightness = 1) => {
+        const noiseLength = Math.floor(audioCtx.sampleRate * duration);
+        const buffer = audioCtx.createBuffer(1, noiseLength, audioCtx.sampleRate);
+        const data = buffer.getChannelData(0);
+        for (let i = 0; i < noiseLength; i += 1) {
+          data[i] = (Math.random() * 2 - 1) * (1 - i / noiseLength) * brightness;
+        }
+        const noise = audioCtx.createBufferSource();
+        const gain = audioCtx.createGain();
+        noise.buffer = buffer;
+        noise.connect(gain);
+        gain.connect(audioCtx.destination);
+        gain.gain.value = volume;
+        gain.gain.exponentialRampToValueAtTime(0.0001, start + duration);
+        noise.start(start);
+        noise.stop(start + duration + 0.01);
+      };
+
+      const padFilter = audioCtx.createBiquadFilter();
+      padFilter.type = "lowpass";
+      padFilter.frequency.value = 1250 + (STARTING_HP - hp) * 180;
+      padFilter.Q.value = 0.7;
+      padFilter.connect(audioCtx.destination);
+
+      if (step % 16 === 0) {
+        [0.5, 1, 1.5].forEach((ratio) => playTone(bass[(step / 16) % bass.length] * ratio, now, 0.7, "triangle", 0.012, padFilter));
+      }
+
+      playTone(note, now, 0.075, step % 4 === 0 ? "square" : "triangle", step % 4 === 0 ? 0.026 : 0.017);
+      if (step % 2 === 1) playTone(note * 1.5, now + 0.035, 0.05, "triangle", 0.012);
+      if (step % 4 === 0) playTone(bass[Math.floor(step / 4) % bass.length], now, 0.2, "sawtooth", 0.055);
+      if (step % 8 === 0) playTone(44, now, 0.18, "sine", 0.08);
+      if (step % 8 === 4) playNoise(now, 0.08, 0.045, 0.85);
+      if (step % 2 === 0) playNoise(now + 0.02, 0.035, 0.015, 0.55);
+
+      beatStepRef.current = step + 1;
+      bgmTimerRef.current = window.setTimeout(playBeat, sixteenthMs);
     };
+
+    const bgm = bgmAudioRef.current;
+    if (bgm) {
+      bgm.volume = Math.min(0.58, 0.38 + (STARTING_HP - hp) * 0.035);
+      bgm.playbackRate = 1;
+      void bgm.play().catch(() => playBeat());
+      return () => {
+        bgm.pause();
+        bgm.playbackRate = 1;
+        if (bgmTimerRef.current) window.clearTimeout(bgmTimerRef.current);
+        bgmTimerRef.current = null;
+      };
+    }
 
     playBeat();
     return () => {
@@ -1000,6 +1099,7 @@ function DefenseGameView({
 
   const resetGame = () => {
     setFalling([]);
+    setParticles([]);
     setInput("");
     setHp(STARTING_HP);
     setSessionHits(0);
@@ -1014,47 +1114,104 @@ function DefenseGameView({
     window.setTimeout(() => window.clearTimeout(readyTimer), 760);
   };
 
-  const playHitSound = () => {
+  const speakThen = (word: string, onDone: () => void) => {
+    if (typeof window === "undefined" || !window.speechSynthesis) {
+      onDone();
+      return;
+    }
+    const utterance = new SpeechSynthesisUtterance(word);
+    utterance.lang = "en-US";
+    utterance.rate = 0.95;
+    let finished = false;
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      onDone();
+    };
+    utterance.onend = finish;
+    utterance.onerror = finish;
+    window.speechSynthesis.cancel();
+    window.speechSynthesis.speak(utterance);
+    window.setTimeout(finish, Math.min(900, 280 + word.length * 55));
+  };
+
+  const playExplosionSound = () => {
     if (!soundEnabled) return;
     const audioCtx = getAudioContext();
     if (!audioCtx) return;
     const now = audioCtx.currentTime;
-    [0, 1, 2, 3].forEach((step) => {
+
+    const master = audioCtx.createGain();
+    const filter = audioCtx.createBiquadFilter();
+    filter.type = "lowpass";
+    filter.frequency.value = 3600;
+    filter.Q.value = 0.45;
+    master.gain.value = 0.52;
+    filter.connect(master);
+    master.connect(audioCtx.destination);
+
+    [659.25, 880, 1174.66, 1567.98].forEach((frequency, step) => {
       const osc = audioCtx.createOscillator();
       const gain = audioCtx.createGain();
-      osc.type = step % 2 === 0 ? "sawtooth" : "square";
-      osc.frequency.value = [620, 840, 1100, 1480][step];
+      osc.type = "triangle";
+      osc.frequency.value = frequency;
       gain.gain.value = 0.0001;
       osc.connect(gain);
-      gain.connect(audioCtx.destination);
-      const start = now + step * 0.035;
-      gain.gain.exponentialRampToValueAtTime(0.11, start + 0.004);
-      gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.07);
+      gain.connect(filter);
+      const start = now + step * 0.045;
+      gain.gain.exponentialRampToValueAtTime(0.026, start + 0.01);
+      gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.16);
       osc.start(start);
-      osc.stop(start + 0.08);
+      osc.stop(start + 0.18);
     });
 
-    const noiseLength = Math.floor(audioCtx.sampleRate * 0.08);
+    const noiseLength = Math.floor(audioCtx.sampleRate * 0.16);
     const buffer = audioCtx.createBuffer(1, noiseLength, audioCtx.sampleRate);
     const data = buffer.getChannelData(0);
-    for (let i = 0; i < noiseLength; i += 1) data[i] = (Math.random() * 2 - 1) * (1 - i / noiseLength);
+    for (let i = 0; i < noiseLength; i += 1) {
+      const fade = 1 - i / noiseLength;
+      data[i] = (Math.random() * 2 - 1) * fade * fade * 0.28;
+    }
     const noise = audioCtx.createBufferSource();
     const noiseGain = audioCtx.createGain();
+    const sparkleFilter = audioCtx.createBiquadFilter();
+    sparkleFilter.type = "bandpass";
+    sparkleFilter.frequency.value = 2200;
+    sparkleFilter.Q.value = 2.4;
     noise.buffer = buffer;
-    noise.connect(noiseGain);
-    noiseGain.connect(audioCtx.destination);
+    noise.connect(sparkleFilter);
+    sparkleFilter.connect(noiseGain);
+    noiseGain.connect(filter);
     noiseGain.gain.value = 0.0001;
-    noiseGain.gain.exponentialRampToValueAtTime(0.06, now + 0.005);
-    noiseGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.1);
+    noiseGain.gain.exponentialRampToValueAtTime(0.018, now + 0.01);
+    noiseGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.16);
     noise.start(now);
-    noise.stop(now + 0.11);
+    noise.stop(now + 0.18);
+  };
+
+  const playLockSound = () => {
+    if (!soundEnabled) return;
+    const audioCtx = getAudioContext();
+    if (!audioCtx) return;
+    const now = audioCtx.currentTime;
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = "triangle";
+    osc.frequency.value = 1046.5;
+    gain.gain.value = 0.0001;
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    gain.gain.exponentialRampToValueAtTime(0.055, now + 0.01);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.12);
+    osc.start(now);
+    osc.stop(now + 0.14);
   };
 
   const burstAt = (x: number, y: number) => {
-    const colors = ["#60a5fa", "#22d3ee", "#fcd34d", "#fb7185", "#a78bfa"];
-    const burst = Array.from({ length: 18 }).map((_, idx) => {
-      const angle = (Math.PI * 2 * idx) / 18;
-      const speed = 0.55 + Math.random() * 1.4;
+    const colors = ["#00e5ff", "#ffea00", "#ff3df2", "#7cff00", "#ffffff"];
+    const burst = Array.from({ length: 36 }).map((_, idx) => {
+      const angle = (Math.PI * 2 * idx) / 36;
+      const speed = 0.85 + Math.random() * 2.4;
       return {
         id: makeId(),
         x,
@@ -1062,7 +1219,7 @@ function DefenseGameView({
         vx: Math.cos(angle) * speed,
         vy: Math.sin(angle) * speed - 0.4,
         life: 1,
-        size: 4 + Math.random() * 5,
+        size: 5 + Math.random() * 10,
         color: colors[idx % colors.length],
       };
     });
@@ -1073,37 +1230,41 @@ function DefenseGameView({
     if (settings.mode === "2-1") {
       return (
         <>
-          <p className="text-[11px] font-medium text-blue-700">{buildHint(item.word)}</p>
-          <p className="mt-0.5 text-[11px] text-slate-600">{item.definitionZh}</p>
+          <p className="font-semibold tracking-[0.16em] text-cyan-200">{buildHint(item.word)}</p>
+          <p className="mt-1 text-[0.8em] text-slate-200">{item.definitionZh}</p>
         </>
       );
     }
     if (settings.mode === "2-2") {
-      return <p className="text-[11px] text-blue-700">{item.definitionZh}</p>;
+      return <p className="text-[0.9em] text-cyan-100">{item.definitionZh}</p>;
     }
     if (settings.mode === "2-3") {
       return (
         <>
-          <p className="text-[11px] font-semibold text-blue-700">{item.word}</p>
-          <p className="mt-0.5 text-[11px] text-slate-600">{item.definitionZh}</p>
+          <p className="font-bold text-cyan-100">{item.word}</p>
+          <p className="mt-1 text-[0.8em] text-slate-200">{item.definitionZh}</p>
         </>
       );
     }
-    return <p className="text-[11px] text-blue-700">{makeCloze(item.sentence, item.word)}</p>;
+    return <p className="text-[0.8em] leading-snug text-cyan-100">{makeCloze(item.sentence, item.word)}</p>;
   };
 
   const onType = (value: string) => {
     setInput(value);
     const normalized = value.trim().toLowerCase();
     if (!normalized) return;
-    const matched = falling.find((item) => item.word.toLowerCase() === normalized);
+    const matched = falling.find((item) => !item.isHit && item.word.toLowerCase() === normalized);
     if (!matched) return;
-    setFalling((prev) => prev.filter((item) => item.gameId !== matched.gameId));
-    burstAt(matched.x, matched.y + 6);
+    setFalling((prev) => prev.map((item) => (item.gameId === matched.gameId ? { ...item, isHit: true } : item)));
     setInput("");
     onHit();
     setSessionHits((old) => old + 1);
-    playHitSound();
+    playLockSound();
+    speakThen(matched.word, () => {
+      setFalling((prev) => prev.filter((item) => item.gameId !== matched.gameId));
+      burstAt(matched.x, matched.y + 6);
+      playExplosionSound();
+    });
   };
 
   if (!words.length) return <EmptyView title="尚無可遊玩單字" description="先在 Smart Lab 建立單字庫，再開始防衛戰。" />;
@@ -1111,19 +1272,24 @@ function DefenseGameView({
   const hitRate = sessionHits + sessionMisses === 0 ? 0 : Math.round((sessionHits / (sessionHits + sessionMisses)) * 100);
 
   return (
-    <div className="relative flex h-full flex-col overflow-hidden bg-gradient-to-b from-slate-900 to-slate-800 text-white">
+    <div className="relative flex h-full flex-col overflow-hidden bg-[#050314] text-white">
+      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_18%_14%,rgba(0,229,255,0.32),transparent_25%),radial-gradient(circle_at_82%_16%,rgba(255,61,242,0.26),transparent_25%),radial-gradient(circle_at_50%_82%,rgba(124,255,0,0.18),transparent_34%),linear-gradient(180deg,rgba(20,12,80,0.4),rgba(3,2,12,0.98))]" />
+      <div className="pointer-events-none absolute inset-0 opacity-30 [background-image:linear-gradient(rgba(0,229,255,.24)_2px,transparent_2px),linear-gradient(90deg,rgba(255,255,255,.12)_2px,transparent_2px)] [background-size:34px_34px]" />
+      <div className="pointer-events-none absolute inset-x-[-20%] top-1/3 h-20 -rotate-6 bg-gradient-to-r from-transparent via-cyan-300/20 to-transparent" />
+      <div className="pointer-events-none absolute left-8 top-24 h-10 w-10 rotate-45 border-4 border-yellow-300/70 shadow-[0_0_22px_rgba(250,204,21,0.6)]" />
+      <div className="pointer-events-none absolute right-10 top-36 h-12 w-12 rotate-12 border-4 border-fuchsia-400/60 shadow-[0_0_24px_rgba(232,121,249,0.55)]" />
       <div className="absolute left-3 top-3 z-20 flex gap-2">
         <button
           type="button"
           onClick={() => setSoundEnabled((v) => !v)}
-          className={`rounded-lg px-2 py-1 text-xs font-semibold ${soundEnabled ? "bg-blue-600 text-white" : "bg-white/20 text-white"}`}
+          className={`rounded-md border border-white/20 px-2 py-1 text-xs font-semibold shadow-[0_0_14px_rgba(0,229,255,0.25)] ${soundEnabled ? "bg-cyan-500 text-slate-950" : "bg-white/20 text-white"}`}
         >
           {soundEnabled ? <Volume2 size={14} /> : <VolumeX size={14} />}
         </button>
         <button
           type="button"
           onClick={() => setMusicEnabled((v) => !v)}
-          className={`rounded-lg px-2 py-1 text-xs font-semibold ${musicEnabled ? "bg-blue-600 text-white" : "bg-white/20 text-white"}`}
+          className={`rounded-md border border-white/20 px-2 py-1 text-xs font-semibold shadow-[0_0_14px_rgba(255,61,242,0.25)] ${musicEnabled ? "bg-fuchsia-400 text-slate-950" : "bg-white/20 text-white"}`}
         >
           {musicEnabled ? <Music2 size={14} /> : <VolumeX size={14} />}
         </button>
@@ -1140,15 +1306,15 @@ function DefenseGameView({
             key={m.key}
             type="button"
             onClick={() => onChangeSettings({ ...settings, mode: m.key })}
-            className={`rounded-lg px-2 py-1 text-xs font-semibold ${settings.mode === m.key ? "bg-blue-600" : "bg-white/20"}`}
+            className={`rounded-md border border-white/20 px-2 py-1 text-xs font-black ${settings.mode === m.key ? "bg-yellow-300 text-slate-950 shadow-[0_0_14px_rgba(250,204,21,0.65)]" : "bg-white/20 text-white"}`}
           >
             {m.label}
           </button>
         ))}
       </div>
 
-      <div className="px-4 pt-3">
-        <div className="flex items-center justify-between">
+      <div className="px-4 pt-12">
+        <div className="relative z-10 flex items-center justify-between">
           <div className="flex items-center gap-1 text-rose-300">
             {Array.from({ length: STARTING_HP }).map((_, idx) => (
               <Heart key={idx} size={18} fill={idx < hp ? "#fb7185" : "none"} />
@@ -1168,15 +1334,34 @@ function DefenseGameView({
               transform: `translate(-50%, ${item.y}vh)`,
             }}
           >
-            <div className="w-[min(86vw,260px)] rounded-xl border border-blue-300/40 bg-white/95 px-3 py-2 text-slate-900 shadow-lg">
+            <div
+              className={`relative w-[38vw] max-w-[220px] min-w-[132px] overflow-hidden border-2 px-3 py-2 text-center shadow-[0_0_24px_rgba(34,211,238,0.35)] backdrop-blur ${
+                item.isHit
+                  ? "scale-105 border-yellow-200 bg-yellow-300/95 text-slate-950 shadow-[0_0_34px_rgba(250,204,21,0.75)] [&_p]:!text-slate-950"
+                  : item.lane === 0
+                    ? "border-cyan-300/70 bg-[#071833]/90 text-white"
+                    : "border-fuchsia-300/70 bg-[#23072f]/90 text-white"
+              }`}
+              style={{ fontSize: `${settings.fontSize}px`, clipPath: "polygon(8% 0, 100% 0, 92% 100%, 0 100%)" }}
+            >
+              <span className="pointer-events-none absolute -left-3 top-1/2 h-6 w-6 -translate-y-1/2 rotate-45 bg-white/18" />
+              <span className="pointer-events-none absolute right-2 top-2 h-2 w-2 rotate-45 bg-white/70" />
               {renderPrompt(item)}
             </div>
           </div>
         ))}
+        <div className="pointer-events-none absolute inset-x-0 bottom-0 flex h-12 items-end justify-around opacity-90">
+          {Array.from({ length: 13 }).map((_, idx) => (
+            <span
+              key={idx}
+              className="h-0 w-0 border-x-[14px] border-b-[32px] border-x-transparent border-b-cyan-300/70 drop-shadow-[0_0_10px_rgba(34,211,238,0.9)]"
+            />
+          ))}
+        </div>
         {particles.map((particle) => (
           <div
             key={particle.id}
-            className="pointer-events-none absolute rounded-full"
+            className="pointer-events-none absolute rotate-45"
             style={{
               left: `${particle.x}%`,
               top: `${particle.y}vh`,
@@ -1191,9 +1376,9 @@ function DefenseGameView({
         ))}
       </div>
 
-      <div className="border-t border-slate-700 bg-slate-900/90 p-4 pb-[max(env(safe-area-inset-bottom),1rem)]">
-        <div className="mb-3 grid grid-cols-2 gap-2 text-xs">
-          <label className="block rounded-lg bg-slate-800/70 p-2">
+      <div className="relative z-20 border-t-2 border-cyan-300/35 bg-[#09051d]/92 p-4 pb-[max(env(safe-area-inset-bottom),1rem)] shadow-[0_-12px_32px_rgba(0,229,255,0.12)] backdrop-blur">
+        <div className="mb-3 grid grid-cols-3 gap-2 text-xs">
+          <label className="block rounded-md border border-cyan-300/25 bg-slate-950/70 p-2">
             落下速度 {settings.speed.toFixed(3)}
             <input
               type="range"
@@ -1205,7 +1390,7 @@ function DefenseGameView({
               className="mt-1 w-full accent-blue-500"
             />
           </label>
-          <label className="block rounded-lg bg-slate-800/70 p-2">
+          <label className="block rounded-md border border-fuchsia-300/25 bg-slate-950/70 p-2">
             出現頻率 {settings.spawnMs}ms
             <input
               type="range"
@@ -1217,11 +1402,23 @@ function DefenseGameView({
               className="mt-1 w-full accent-blue-500"
             />
           </label>
+          <label className="block rounded-md border border-yellow-300/25 bg-slate-950/70 p-2">
+            字體 {settings.fontSize}px
+            <input
+              type="range"
+              min="10"
+              max="22"
+              step="1"
+              value={settings.fontSize}
+              onChange={(e) => onChangeSettings({ ...settings, fontSize: Number(e.target.value) })}
+              className="mt-1 w-full accent-blue-500"
+            />
+          </label>
         </div>
         <div className="mb-2 flex items-center justify-between text-xs text-slate-300">
           <span>輸入正確英文即可擊落</span>
           {phase === "over" && (
-            <button type="button" onClick={resetGame} className="rounded-md bg-blue-600 px-2 py-1 text-white">
+            <button type="button" onClick={() => resetGame()} className="rounded-md bg-blue-600 px-2 py-1 text-white">
               重新開始
             </button>
           )}
@@ -1232,7 +1429,7 @@ function DefenseGameView({
           onChange={(e) => onType(e.target.value)}
           disabled={phase !== "playing"}
           placeholder={phase === "over" ? "Game over" : phase === "ready" ? "Ready..." : "type answer..."}
-          className="w-full rounded-xl border border-blue-400/60 bg-slate-800 px-4 py-3 text-base text-white outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+          className="w-full rounded-md border-2 border-cyan-300/60 bg-slate-950 px-4 py-3 text-base font-semibold text-white shadow-[0_0_18px_rgba(0,229,255,0.18)] outline-none focus:ring-2 focus:ring-yellow-300 disabled:opacity-50"
         />
       </div>
 
@@ -1252,7 +1449,7 @@ function DefenseGameView({
             <p className="text-sm text-slate-200">Hit rate: {hitRate}%</p>
             <button
               type="button"
-              onClick={resetGame}
+              onClick={() => resetGame()}
               className="mt-4 rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white"
             >
               Play Again
