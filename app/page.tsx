@@ -1372,8 +1372,9 @@ function DefenseGameView({
   const beatStepRef = useRef(0);
   const timeUrgencyRef = useRef(0);
   const gameLevelRef = useRef(1);
+  const singleLevelQueueRef = useRef<WordItem[]>([]);
   const lanes = useMemo(() => [28, 72], []);
-  const levelGoal = singleLevel ? Math.max(1, words.length) : getLevelGoal(gameLevel);
+  const levelGoal = singleLevel ? Math.max(words.length + 1, Math.ceil(words.length * 1.35)) : getLevelGoal(gameLevel);
   const levelTimeLimit = singleLevel ? Math.max(45, words.length * 7) : getLevelTimeLimit(gameLevel);
   const timeUrgency = 1 - timeRemaining / levelTimeLimit;
   const levelTheme = getLevelTheme(gameLevel);
@@ -1383,6 +1384,10 @@ function DefenseGameView({
     if (!audioCtxRef.current) audioCtxRef.current = new window.AudioContext();
     return audioCtxRef.current;
   };
+
+  const resetSingleLevelQueue = useCallback(() => {
+    singleLevelQueueRef.current = singleLevel ? [...words].sort(() => Math.random() - 0.5) : [];
+  }, [singleLevel, words]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -1448,6 +1453,10 @@ function DefenseGameView({
   }, [levelGoal, phase, sessionHits]);
 
   useEffect(() => {
+    resetSingleLevelQueue();
+  }, [resetSingleLevelQueue]);
+
+  useEffect(() => {
     if (phase !== "playing") return;
     const timer = window.setInterval(() => {
       setTimeRemaining((prev) => {
@@ -1464,7 +1473,7 @@ function DefenseGameView({
   useEffect(() => {
     if (!words.length || phase !== "playing" || hp <= 0) return;
     const spawn = window.setInterval(() => {
-      const pick = pickWeightedWord(words);
+      const pick = singleLevel && singleLevelQueueRef.current.length > 0 ? singleLevelQueueRef.current.shift()! : pickWeightedWord(words);
       setFalling((prev) => {
         const openLanes = lanes.filter((lane, idx) => !prev.some((item) => item.lane === idx && item.y < 30));
         if (!openLanes.length) return prev;
@@ -1483,7 +1492,7 @@ function DefenseGameView({
       });
     }, settings.spawnMs);
     return () => window.clearInterval(spawn);
-  }, [words, settings.spawnMs, hp, phase, lanes]);
+  }, [words, settings.spawnMs, hp, phase, lanes, singleLevel]);
 
   useEffect(() => {
     if (phase !== "playing") return;
@@ -1644,6 +1653,7 @@ function DefenseGameView({
     setSessionMisses(0);
     setSessionScore(0);
     setBestSpeedBonus(0);
+    resetSingleLevelQueue();
     setReadyText("Ready");
     setPhase("ready");
     const readyTimer = window.setTimeout(() => setReadyText("Go!"), 700);
@@ -1668,6 +1678,7 @@ function DefenseGameView({
     setSessionMisses(0);
     setSessionScore(0);
     setBestSpeedBonus(0);
+    resetSingleLevelQueue();
     setReadyText("Ready");
     setPhase("ready");
     const readyTimer = window.setTimeout(() => setReadyText("Go!"), 700);
