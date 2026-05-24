@@ -12,14 +12,18 @@ import {
   Music2,
   Plus,
   Sparkles,
+  Timer,
+  Trophy,
   Trash2,
   Upload,
   Volume2,
   VolumeX,
+  Zap,
 } from "lucide-react";
 
 type Tab = "lab" | "flashcard" | "game" | "outcome";
 type GameMode = "2-1" | "2-2" | "2-3" | "3";
+type GamePhase = "ready" | "playing" | "clear" | "over";
 
 interface WordItem {
   id: string;
@@ -71,8 +75,49 @@ interface HitParticle {
   color: string;
 }
 
+interface RewardToast {
+  id: string;
+  text: string;
+  x: number;
+  y: number;
+}
+
 const BLUE = "#2563eb";
 const STARTING_HP = 5;
+const LEVEL_THEMES = [
+  {
+    name: "Neon Grid",
+    bg: "bg-[radial-gradient(circle_at_18%_14%,rgba(0,229,255,0.32),transparent_25%),radial-gradient(circle_at_82%_16%,rgba(255,61,242,0.26),transparent_25%),radial-gradient(circle_at_50%_82%,rgba(124,255,0,0.18),transparent_34%),linear-gradient(180deg,rgba(20,12,80,0.4),rgba(3,2,12,0.98))]",
+    grid: "[background-image:linear-gradient(rgba(0,229,255,.24)_2px,transparent_2px),linear-gradient(90deg,rgba(255,255,255,.12)_2px,transparent_2px)]",
+  },
+  {
+    name: "Solar Circuit",
+    bg: "bg-[radial-gradient(circle_at_20%_18%,rgba(250,204,21,0.34),transparent_24%),radial-gradient(circle_at_84%_24%,rgba(244,63,94,0.22),transparent_24%),radial-gradient(circle_at_48%_78%,rgba(34,197,94,0.18),transparent_36%),linear-gradient(180deg,rgba(60,23,8,0.48),rgba(7,4,14,0.98))]",
+    grid: "[background-image:linear-gradient(rgba(250,204,21,.22)_2px,transparent_2px),linear-gradient(90deg,rgba(255,255,255,.1)_2px,transparent_2px)]",
+  },
+  {
+    name: "Violet Rush",
+    bg: "bg-[radial-gradient(circle_at_16%_22%,rgba(168,85,247,0.32),transparent_24%),radial-gradient(circle_at_80%_18%,rgba(45,212,191,0.24),transparent_25%),radial-gradient(circle_at_50%_82%,rgba(59,130,246,0.24),transparent_36%),linear-gradient(180deg,rgba(22,16,78,0.56),rgba(5,3,18,0.98))]",
+    grid: "[background-image:linear-gradient(rgba(196,181,253,.22)_2px,transparent_2px),linear-gradient(90deg,rgba(255,255,255,.1)_2px,transparent_2px)]",
+  },
+  {
+    name: "Emerald Rail",
+    bg: "bg-[radial-gradient(circle_at_18%_18%,rgba(52,211,153,0.32),transparent_24%),radial-gradient(circle_at_82%_20%,rgba(56,189,248,0.24),transparent_25%),radial-gradient(circle_at_50%_84%,rgba(217,70,239,0.18),transparent_36%),linear-gradient(180deg,rgba(4,48,38,0.52),rgba(2,8,15,0.98))]",
+    grid: "[background-image:linear-gradient(rgba(52,211,153,.22)_2px,transparent_2px),linear-gradient(90deg,rgba(255,255,255,.1)_2px,transparent_2px)]",
+  },
+];
+
+function getLevelGoal(level: number): number {
+  return 6 + (level - 1) * 3;
+}
+
+function getLevelTimeLimit(level: number): number {
+  return 50 + level * 8;
+}
+
+function getLevelTheme(level: number) {
+  return LEVEL_THEMES[(level - 1) % LEVEL_THEMES.length];
+}
 
 const PRELOAD_WORDS: Omit<WordItem, "id">[] = [
   { word: "coordinate", definitionZh: "協調", pos: "verb", ipa: "/koʊˈɔrdɪneɪt/", sentence: "Please coordinate with design before release." },
@@ -877,20 +922,31 @@ function DefenseGameView({
   const [falling, setFalling] = useState<FallingWord[]>([]);
   const [input, setInput] = useState("");
   const [hp, setHp] = useState(STARTING_HP);
-  const [phase, setPhase] = useState<"ready" | "playing" | "over">("ready");
+  const [phase, setPhase] = useState<GamePhase>("ready");
   const [readyText, setReadyText] = useState("Ready");
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [musicEnabled, setMusicEnabled] = useState(true);
+  const [gameLevel, setGameLevel] = useState(1);
+  const [timeRemaining, setTimeRemaining] = useState(() => getLevelTimeLimit(1));
   const [sessionHits, setSessionHits] = useState(0);
   const [sessionMisses, setSessionMisses] = useState(0);
+  const [sessionScore, setSessionScore] = useState(0);
+  const [bestSpeedBonus, setBestSpeedBonus] = useState(0);
   const [particles, setParticles] = useState<HitParticle[]>([]);
+  const [rewards, setRewards] = useState<RewardToast[]>([]);
   const rafRef = useRef<number | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const bgmAudioRef = useRef<HTMLAudioElement | null>(null);
   const bgmTimerRef = useRef<number | null>(null);
   const beatStepRef = useRef(0);
+  const timeUrgencyRef = useRef(0);
+  const gameLevelRef = useRef(1);
   const lanes = useMemo(() => [28, 72], []);
+  const levelGoal = getLevelGoal(gameLevel);
+  const levelTimeLimit = getLevelTimeLimit(gameLevel);
+  const timeUrgency = 1 - timeRemaining / levelTimeLimit;
+  const levelTheme = getLevelTheme(gameLevel);
 
   const getAudioContext = () => {
     if (typeof window === "undefined") return null;
@@ -913,6 +969,15 @@ function DefenseGameView({
   }, []);
 
   useEffect(() => {
+    timeUrgencyRef.current = timeUrgency;
+    gameLevelRef.current = gameLevel;
+    if (bgmAudioRef.current && phase === "playing") {
+      bgmAudioRef.current.volume = Math.min(0.52, 0.34 + (STARTING_HP - hp) * 0.025 + timeUrgency * 0.08);
+      bgmAudioRef.current.playbackRate = Math.min(1.38, 0.96 + timeUrgency * 0.32 + gameLevel * 0.015);
+    }
+  }, [gameLevel, hp, phase, timeUrgency]);
+
+  useEffect(() => {
     const readyTimer = window.setTimeout(() => setReadyText("Go!"), 700);
     const goTimer = window.setTimeout(() => {
       setPhase("playing");
@@ -929,6 +994,30 @@ function DefenseGameView({
     const overTimer = window.setTimeout(() => setPhase("over"), 0);
     return () => window.clearTimeout(overTimer);
   }, [hp, phase]);
+
+  useEffect(() => {
+    if (phase !== "playing") return;
+    if (sessionHits < levelGoal) return;
+    const clearTimer = window.setTimeout(() => {
+      setFalling([]);
+      setPhase("clear");
+    }, 0);
+    return () => window.clearTimeout(clearTimer);
+  }, [levelGoal, phase, sessionHits]);
+
+  useEffect(() => {
+    if (phase !== "playing") return;
+    const timer = window.setInterval(() => {
+      setTimeRemaining((prev) => {
+        if (prev <= 1) {
+          setPhase(sessionHits >= levelGoal ? "clear" : "over");
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [levelGoal, phase, sessionHits]);
 
   useEffect(() => {
     if (!words.length || phase !== "playing" || hp <= 0) return;
@@ -1000,7 +1089,7 @@ function DefenseGameView({
       if (!audioCtx || !musicEnabled || phase !== "playing" || hp <= 0) return;
       const now = audioCtx.currentTime;
       const step = beatStepRef.current;
-      const bpm = 136 + (STARTING_HP - hp) * 10;
+      const bpm = 132 + (STARTING_HP - hp) * 8 + timeUrgencyRef.current * 48 + gameLevelRef.current * 3;
       const sixteenthMs = Math.round(60000 / bpm / 4);
       const melody = [392, 523.25, 659.25, 783.99, 987.77, 880, 783.99, 659.25, 440, 587.33, 739.99, 987.77, 1174.66, 987.77, 739.99, 587.33];
       const bass = [98, 98, 130.81, 98, 146.83, 146.83, 130.81, 110];
@@ -1068,8 +1157,8 @@ function DefenseGameView({
 
     const bgm = bgmAudioRef.current;
     if (bgm) {
-      bgm.volume = Math.min(0.58, 0.38 + (STARTING_HP - hp) * 0.035);
-      bgm.playbackRate = 1;
+      bgm.volume = Math.min(0.52, 0.34 + (STARTING_HP - hp) * 0.025 + timeUrgencyRef.current * 0.08);
+      bgm.playbackRate = Math.min(1.38, 0.96 + timeUrgencyRef.current * 0.32 + gameLevelRef.current * 0.015);
       void bgm.play().catch(() => playBeat());
       return () => {
         bgm.pause();
@@ -1099,11 +1188,38 @@ function DefenseGameView({
 
   const resetGame = () => {
     setFalling([]);
+    setRewards([]);
+    setParticles([]);
+    setInput("");
+    setHp(STARTING_HP);
+    setTimeRemaining(getLevelTimeLimit(gameLevel));
+    setSessionHits(0);
+    setSessionMisses(0);
+    setSessionScore(0);
+    setBestSpeedBonus(0);
+    setReadyText("Ready");
+    setPhase("ready");
+    const readyTimer = window.setTimeout(() => setReadyText("Go!"), 700);
+    window.setTimeout(() => {
+      setPhase("playing");
+      inputRef.current?.focus();
+    }, 1450);
+    window.setTimeout(() => window.clearTimeout(readyTimer), 760);
+  };
+
+  const nextLevel = () => {
+    const next = gameLevel + 1;
+    setGameLevel(next);
+    setTimeRemaining(getLevelTimeLimit(next));
+    setFalling([]);
+    setRewards([]);
     setParticles([]);
     setInput("");
     setHp(STARTING_HP);
     setSessionHits(0);
     setSessionMisses(0);
+    setSessionScore(0);
+    setBestSpeedBonus(0);
     setReadyText("Ready");
     setPhase("ready");
     const readyTimer = window.setTimeout(() => setReadyText("Go!"), 700);
@@ -1226,6 +1342,14 @@ function DefenseGameView({
     setParticles((prev) => [...prev, ...burst]);
   };
 
+  const showReward = (text: string, x: number, y: number) => {
+    const id = makeId();
+    setRewards((prev) => [...prev, { id, text, x, y }]);
+    window.setTimeout(() => {
+      setRewards((prev) => prev.filter((reward) => reward.id !== id));
+    }, 1100);
+  };
+
   const renderPrompt = (item: WordItem) => {
     if (settings.mode === "2-1") {
       return (
@@ -1255,10 +1379,18 @@ function DefenseGameView({
     if (!normalized) return;
     const matched = falling.find((item) => !item.isHit && item.word.toLowerCase() === normalized);
     if (!matched) return;
+    const answerMs = Math.max(200, Date.now() - matched.bornAt);
+    const speedWindow = Math.max(4200, 9500 - gameLevel * 450);
+    const speedRatio = Math.max(0, 1 - answerMs / speedWindow);
+    const speedBonus = Math.round(speedRatio * 90);
+    const wordPoints = matched.word.length * 10 + speedBonus + gameLevel * 8;
     setFalling((prev) => prev.map((item) => (item.gameId === matched.gameId ? { ...item, isHit: true } : item)));
     setInput("");
     onHit();
     setSessionHits((old) => old + 1);
+    setSessionScore((old) => old + wordPoints);
+    setBestSpeedBonus((old) => Math.max(old, speedBonus));
+    showReward(`+${wordPoints}  FAST +${speedBonus}`, matched.x, matched.y + 2);
     playLockSound();
     speakThen(matched.word, () => {
       setFalling((prev) => prev.filter((item) => item.gameId !== matched.gameId));
@@ -1270,11 +1402,13 @@ function DefenseGameView({
   if (!words.length) return <EmptyView title="尚無可遊玩單字" description="先在 Smart Lab 建立單字庫，再開始防衛戰。" />;
 
   const hitRate = sessionHits + sessionMisses === 0 ? 0 : Math.round((sessionHits / (sessionHits + sessionMisses)) * 100);
+  const progressPercent = Math.min(100, Math.round((sessionHits / levelGoal) * 100));
+  const timePercent = Math.max(0, Math.round((timeRemaining / levelTimeLimit) * 100));
 
   return (
     <div className="relative flex h-full flex-col overflow-hidden bg-[#050314] text-white">
-      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_18%_14%,rgba(0,229,255,0.32),transparent_25%),radial-gradient(circle_at_82%_16%,rgba(255,61,242,0.26),transparent_25%),radial-gradient(circle_at_50%_82%,rgba(124,255,0,0.18),transparent_34%),linear-gradient(180deg,rgba(20,12,80,0.4),rgba(3,2,12,0.98))]" />
-      <div className="pointer-events-none absolute inset-0 opacity-30 [background-image:linear-gradient(rgba(0,229,255,.24)_2px,transparent_2px),linear-gradient(90deg,rgba(255,255,255,.12)_2px,transparent_2px)] [background-size:34px_34px]" />
+      <div className={`pointer-events-none absolute inset-0 ${levelTheme.bg}`} />
+      <div className={`pointer-events-none absolute inset-0 opacity-30 ${levelTheme.grid} [background-size:34px_34px]`} />
       <div className="pointer-events-none absolute inset-x-[-20%] top-1/3 h-20 -rotate-6 bg-gradient-to-r from-transparent via-cyan-300/20 to-transparent" />
       <div className="pointer-events-none absolute left-8 top-24 h-10 w-10 rotate-45 border-4 border-yellow-300/70 shadow-[0_0_22px_rgba(250,204,21,0.6)]" />
       <div className="pointer-events-none absolute right-10 top-36 h-12 w-12 rotate-12 border-4 border-fuchsia-400/60 shadow-[0_0_24px_rgba(232,121,249,0.55)]" />
@@ -1314,13 +1448,47 @@ function DefenseGameView({
       </div>
 
       <div className="px-4 pt-12">
-        <div className="relative z-10 flex items-center justify-between">
-          <div className="flex items-center gap-1 text-rose-300">
-            {Array.from({ length: STARTING_HP }).map((_, idx) => (
-              <Heart key={idx} size={18} fill={idx < hp ? "#fb7185" : "none"} />
-            ))}
+        <div className="relative z-10 space-y-2">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-1 text-rose-300">
+              {Array.from({ length: STARTING_HP }).map((_, idx) => (
+                <Heart key={idx} size={18} fill={idx < hp ? "#fb7185" : "none"} />
+              ))}
+            </div>
+            <p className="text-xs text-slate-300">mode {settings.mode}</p>
           </div>
-          <p className="text-xs text-slate-300">mode {settings.mode}</p>
+          <div className="grid grid-cols-3 gap-2 text-xs">
+            <div className="rounded-md border border-white/15 bg-slate-950/55 px-2 py-1.5 backdrop-blur">
+              <p className="flex items-center gap-1 text-[10px] text-cyan-200">
+                <Trophy size={11} />
+                Lv.{gameLevel}
+              </p>
+              <p className="text-lg font-black text-yellow-200">
+                {sessionHits}<span className="text-xs text-slate-300">/{levelGoal}</span>
+              </p>
+              <div className="h-1 overflow-hidden rounded-full bg-white/15">
+                <div className="h-full rounded-full bg-yellow-300" style={{ width: `${progressPercent}%` }} />
+              </div>
+            </div>
+            <div className="rounded-md border border-white/15 bg-slate-950/55 px-2 py-1.5 backdrop-blur">
+              <p className="flex items-center gap-1 text-[10px] text-cyan-200">
+                <Timer size={11} />
+                time
+              </p>
+              <p className={`text-lg font-black ${timeRemaining <= 10 ? "text-rose-300" : "text-cyan-100"}`}>{secondsToClock(timeRemaining)}</p>
+              <div className="h-1 overflow-hidden rounded-full bg-white/15">
+                <div className="h-full rounded-full bg-rose-300" style={{ width: `${timePercent}%` }} />
+              </div>
+            </div>
+            <div className="rounded-md border border-white/15 bg-slate-950/55 px-2 py-1.5 backdrop-blur">
+              <p className="flex items-center gap-1 text-[10px] text-cyan-200">
+                <Zap size={11} />
+                score
+              </p>
+              <p className="text-lg font-black text-white">{sessionScore}</p>
+              <p className="truncate text-[10px] text-slate-400">{levelTheme.name}</p>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -1374,6 +1542,15 @@ function DefenseGameView({
             }}
           />
         ))}
+        {rewards.map((reward) => (
+          <div
+            key={reward.id}
+            className="pointer-events-none absolute z-20 rounded-md border border-yellow-200/60 bg-slate-950/80 px-2 py-1 text-xs font-black text-yellow-200 shadow-[0_0_18px_rgba(250,204,21,0.45)]"
+            style={{ left: `${reward.x}%`, top: `${reward.y}vh`, transform: "translate(-50%, -50%)" }}
+          >
+            {reward.text}
+          </div>
+        ))}
       </div>
 
       <div className="relative z-20 border-t-2 border-cyan-300/35 bg-[#09051d]/92 p-4 pb-[max(env(safe-area-inset-bottom),1rem)] shadow-[0_-12px_32px_rgba(0,229,255,0.12)] backdrop-blur">
@@ -1417,7 +1594,7 @@ function DefenseGameView({
         </div>
         <div className="mb-2 flex items-center justify-between text-xs text-slate-300">
           <span>輸入正確英文即可擊落</span>
-          {phase === "over" && (
+          {(phase === "over" || phase === "clear") && (
             <button type="button" onClick={() => resetGame()} className="rounded-md bg-blue-600 px-2 py-1 text-white">
               重新開始
             </button>
@@ -1428,7 +1605,7 @@ function DefenseGameView({
           value={input}
           onChange={(e) => onType(e.target.value)}
           disabled={phase !== "playing"}
-          placeholder={phase === "over" ? "Game over" : phase === "ready" ? "Ready..." : "type answer..."}
+          placeholder={phase === "over" ? "Game over" : phase === "clear" ? "Level clear" : phase === "ready" ? "Ready..." : "type answer..."}
           className="w-full rounded-md border-2 border-cyan-300/60 bg-slate-950 px-4 py-3 text-base font-semibold text-white shadow-[0_0_18px_rgba(0,229,255,0.18)] outline-none focus:ring-2 focus:ring-yellow-300 disabled:opacity-50"
         />
       </div>
@@ -1441,12 +1618,56 @@ function DefenseGameView({
         </div>
       )}
 
+      {phase === "clear" && (
+        <div className="absolute inset-0 z-30 flex items-center justify-center bg-slate-950/60 backdrop-blur-sm">
+          <div className="relative w-[min(88vw,340px)] overflow-hidden rounded-2xl border border-yellow-200/50 bg-slate-900/92 p-6 text-center shadow-[0_0_42px_rgba(250,204,21,0.24)]">
+            <div className="pointer-events-none absolute inset-x-0 top-0 h-2 bg-gradient-to-r from-cyan-300 via-yellow-300 to-lime-300" />
+            <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full border border-yellow-200/70 bg-yellow-300 text-slate-950 shadow-[0_0_28px_rgba(250,204,21,0.65)]">
+              <Trophy size={30} />
+            </div>
+            <p className="mt-3 text-3xl font-black text-yellow-200">Level Clear</p>
+            <p className="mt-1 text-sm text-slate-300">Lv.{gameLevel} completed</p>
+            <div className="mt-4 grid grid-cols-2 gap-2 text-left text-sm">
+              <div className="rounded-md border border-white/10 bg-white/10 p-3">
+                <p className="text-xs text-slate-400">答對</p>
+                <p className="text-xl font-black text-white">{sessionHits}/{levelGoal}</p>
+              </div>
+              <div className="rounded-md border border-white/10 bg-white/10 p-3">
+                <p className="text-xs text-slate-400">分數</p>
+                <p className="text-xl font-black text-white">{sessionScore}</p>
+              </div>
+              <div className="rounded-md border border-white/10 bg-white/10 p-3">
+                <p className="text-xs text-slate-400">剩餘時間</p>
+                <p className="text-xl font-black text-white">{secondsToClock(timeRemaining)}</p>
+              </div>
+              <div className="rounded-md border border-white/10 bg-white/10 p-3">
+                <p className="text-xs text-slate-400">最佳速度獎勵</p>
+                <p className="text-xl font-black text-white">+{bestSpeedBonus}</p>
+              </div>
+            </div>
+            <div className="mt-4 flex gap-2">
+              <button
+                type="button"
+                onClick={() => resetGame()}
+                className="flex-1 rounded-lg border border-white/15 bg-white/10 px-4 py-2 text-sm font-semibold text-white"
+              >
+                重玩本關
+              </button>
+              <button type="button" onClick={nextLevel} className="flex-1 rounded-lg bg-yellow-300 px-4 py-2 text-sm font-black text-slate-950">
+                下一關
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {phase === "over" && (
         <div className="absolute inset-0 z-30 flex items-center justify-center bg-slate-950/70 backdrop-blur-sm">
           <div className="w-[min(88vw,340px)] rounded-2xl border border-red-300/30 bg-slate-900/90 p-6 text-center shadow-2xl">
-            <p className="text-3xl font-black text-rose-300">Game Over</p>
-            <p className="mt-3 text-sm text-slate-200">Session hits: {sessionHits}</p>
-            <p className="text-sm text-slate-200">Hit rate: {hitRate}%</p>
+            <p className="text-3xl font-black text-rose-300">{hp <= 0 ? "Base Down" : "Time Up"}</p>
+            <p className="mt-3 text-sm text-slate-200">答對: {sessionHits}/{levelGoal}</p>
+            <p className="text-sm text-slate-200">分數: {sessionScore}</p>
+            <p className="text-sm text-slate-200">命中率: {hitRate}%</p>
             <button
               type="button"
               onClick={() => resetGame()}
