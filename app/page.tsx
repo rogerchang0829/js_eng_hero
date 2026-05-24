@@ -507,6 +507,7 @@ export default function EnglishHeroPage() {
   const [words, setWords] = useState<WordItem[]>([]);
   const [stats, setStats] = useState<Stats>({ totalHits: 0, totalMisses: 0, totalPracticeSeconds: 0 });
   const [gameSettings, setGameSettings] = useState<GameSettings>({ speed: 0.12, spawnMs: 2200, mode: "2-1", fontSize: 13 });
+  const [flashcardDefenseWords, setFlashcardDefenseWords] = useState<WordItem[] | null>(null);
   const [isHydrated, setIsHydrated] = useState(false);
 
   const accuracy = useMemo(() => {
@@ -615,6 +616,11 @@ export default function EnglishHeroPage() {
     if (backup.gameSettings) setGameSettings((prev) => ({ ...prev, ...backup.gameSettings }));
     setActiveTab("lab");
   };
+
+  const startDefenseFromFlashcards = useCallback((sessionWords: WordItem[]) => {
+    setFlashcardDefenseWords(sessionWords);
+    setActiveTab("game");
+  }, []);
 
   const enrichFromDictionary = async (wordId: string, targetWord: string) => {
     try {
@@ -773,15 +779,18 @@ export default function EnglishHeroPage() {
             onRestoreLearningData={handleRestoreLearningData}
           />
         )}
-        {activeTab === "flashcard" && <FlashcardView words={practiceWords} onStudyWord={recordFlashcardStudy} />}
+        {activeTab === "flashcard" && (
+          <FlashcardView words={practiceWords} onStudyWord={recordFlashcardStudy} onStartDefense={startDefenseFromFlashcards} />
+        )}
         {activeTab === "game" && (
           <DefenseGameView
-            words={practiceWords}
+            words={flashcardDefenseWords ?? practiceWords}
             settings={gameSettings}
             onChangeSettings={setGameSettings}
             onHit={() => setStats((prev) => ({ ...prev, totalHits: prev.totalHits + 1 }))}
             onMiss={() => setStats((prev) => ({ ...prev, totalMisses: prev.totalMisses + 1 }))}
             onWordResult={recordDefenseResult}
+            singleLevel={Boolean(flashcardDefenseWords)}
           />
         )}
         {activeTab === "outcome" && (
@@ -807,7 +816,10 @@ export default function EnglishHeroPage() {
             <button
               key={item.id}
               type="button"
-              onClick={() => setActiveTab(item.id)}
+              onClick={() => {
+                if (item.id === "game") setFlashcardDefenseWords(null);
+                setActiveTab(item.id);
+              }}
               className={`flex flex-1 flex-col items-center justify-center rounded-xl transition ${
                 isActive ? "text-blue-600" : "text-slate-400"
               }`}
@@ -1014,13 +1026,22 @@ function SmartLabView({
   );
 }
 
-function FlashcardView({ words, onStudyWord }: { words: WordItem[]; onStudyWord: (wordId: string, action: "view" | "speak") => void }) {
+function FlashcardView({
+  words,
+  onStudyWord,
+  onStartDefense,
+}: {
+  words: WordItem[];
+  onStudyWord: (wordId: string, action: "view" | "speak") => void;
+  onStartDefense: (sessionWords: WordItem[]) => void;
+}) {
   const suggestedGoal = getSuggestedFlashcardGoal(words.length);
   const [targetCount, setTargetCount] = useState(suggestedGoal);
   const [sessionWords, setSessionWords] = useState<WordItem[]>([]);
   const [index, setIndex] = useState(0);
   const [flipped, setFlipped] = useState(false);
   const [cardSeconds, setCardSeconds] = useState(0);
+  const [sessionComplete, setSessionComplete] = useState(false);
   const viewedThisSessionRef = useRef<Set<string>>(new Set());
   const current = sessionWords[index];
   const currentId = current?.id;
@@ -1031,9 +1052,10 @@ function FlashcardView({ words, onStudyWord }: { words: WordItem[]; onStudyWord:
 
   useEffect(() => {
     if (!currentId) return;
+    if (sessionComplete) return;
     const timer = window.setInterval(() => setCardSeconds((prev) => prev + 1), 1000);
     return () => window.clearInterval(timer);
-  }, [currentId, flipped]);
+  }, [currentId, flipped, sessionComplete]);
 
   useEffect(() => {
     if (!currentId) return;
@@ -1054,6 +1076,7 @@ function FlashcardView({ words, onStudyWord }: { words: WordItem[]; onStudyWord:
     setIndex(0);
     setFlipped(false);
     setCardSeconds(0);
+    setSessionComplete(false);
   };
 
   if (!sessionWords.length) {
@@ -1117,7 +1140,18 @@ function FlashcardView({ words, onStudyWord }: { words: WordItem[]; onStudyWord:
 
   const shift = (delta: number) => {
     setFlipped(false);
+    setCardSeconds(0);
     setIndex((prev) => (prev + delta + sessionWords.length) % sessionWords.length);
+  };
+
+  const goNext = () => {
+    if (index >= sessionWords.length - 1) {
+      setFlipped(false);
+      setCardSeconds(0);
+      setSessionComplete(true);
+      return;
+    }
+    shift(1);
   };
 
   const speakWord = () => {
@@ -1137,6 +1171,44 @@ function FlashcardView({ words, onStudyWord }: { words: WordItem[]; onStudyWord:
     .filter((line) => line && line !== current.sentence)
     .slice(0, 3);
   const progressPercent = Math.round(((index + 1) / sessionWords.length) * 100);
+
+  if (sessionComplete) {
+    return (
+      <div className="space-y-4 px-4 py-5">
+        <section className="rounded-2xl border border-blue-100 bg-white p-5 text-center shadow-sm">
+          <p className="text-xs font-semibold uppercase text-blue-500">Session Complete</p>
+          <h2 className="mt-1 text-2xl font-bold text-slate-900">本次 Flashcard 完成</h2>
+          <p className="mt-2 text-sm text-slate-500">你已完成 {sessionWords.length} 個推薦單字。要直接用這批單字進行單關 Defense 嗎？</p>
+          <div className="mt-4 grid grid-cols-2 gap-2">
+            <button
+              type="button"
+              onClick={() => setSessionWords([])}
+              className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700"
+            >
+              先不要
+            </button>
+            <button
+              type="button"
+              onClick={() => onStartDefense(sessionWords)}
+              className="rounded-xl bg-blue-600 px-3 py-2 text-sm font-semibold text-white"
+            >
+              開始 Defense
+            </button>
+          </div>
+        </section>
+        <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+          <p className="text-sm font-semibold text-slate-700">本次遊戲單字</p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            {sessionWords.map((word) => (
+              <span key={word.id} className="rounded-full bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700">
+                {word.word}
+              </span>
+            ))}
+          </div>
+        </section>
+      </div>
+    );
+  }
 
   return (
     <div className="px-4 py-6">
@@ -1237,17 +1309,20 @@ function FlashcardView({ words, onStudyWord }: { words: WordItem[]; onStudyWord:
         </button>
         <button
           type="button"
-          onClick={() => shift(1)}
+          onClick={goNext}
           className="flex flex-1 items-center justify-center gap-1 rounded-xl bg-blue-600 px-3 py-3 text-sm font-semibold text-white"
         >
-          下一個
+          {index >= sessionWords.length - 1 ? "完成" : "下一個"}
           <ChevronRight size={16} />
         </button>
       </div>
       <div className="mx-auto mt-3 max-w-md">
         <button
           type="button"
-          onClick={() => setSessionWords([])}
+          onClick={() => {
+            setSessionWords([]);
+            setSessionComplete(false);
+          }}
           className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-600"
         >
           重新設定本次目標
@@ -1264,6 +1339,7 @@ function DefenseGameView({
   onHit,
   onMiss,
   onWordResult,
+  singleLevel = false,
 }: {
   words: WordItem[];
   settings: GameSettings;
@@ -1271,6 +1347,7 @@ function DefenseGameView({
   onHit: () => void;
   onMiss: () => void;
   onWordResult: (wordId: string, result: "correct" | "miss", answerMs?: number) => void;
+  singleLevel?: boolean;
 }) {
   const [falling, setFalling] = useState<FallingWord[]>([]);
   const [input, setInput] = useState("");
@@ -1296,8 +1373,8 @@ function DefenseGameView({
   const timeUrgencyRef = useRef(0);
   const gameLevelRef = useRef(1);
   const lanes = useMemo(() => [28, 72], []);
-  const levelGoal = getLevelGoal(gameLevel);
-  const levelTimeLimit = getLevelTimeLimit(gameLevel);
+  const levelGoal = singleLevel ? Math.max(1, words.length) : getLevelGoal(gameLevel);
+  const levelTimeLimit = singleLevel ? Math.max(45, words.length * 7) : getLevelTimeLimit(gameLevel);
   const timeUrgency = 1 - timeRemaining / levelTimeLimit;
   const levelTheme = getLevelTheme(gameLevel);
 
@@ -1562,7 +1639,7 @@ function DefenseGameView({
     setParticles([]);
     setInput("");
     setHp(STARTING_HP);
-    setTimeRemaining(getLevelTimeLimit(gameLevel));
+    setTimeRemaining(levelTimeLimit);
     setSessionHits(0);
     setSessionMisses(0);
     setSessionScore(0);
@@ -1578,6 +1655,7 @@ function DefenseGameView({
   };
 
   const nextLevel = () => {
+    if (singleLevel) return;
     const next = gameLevel + 1;
     setGameLevel(next);
     setTimeRemaining(getLevelTimeLimit(next));
@@ -1997,7 +2075,7 @@ function DefenseGameView({
               <Trophy size={30} />
             </div>
             <p className="mt-3 text-3xl font-black text-yellow-200">Level Clear</p>
-            <p className="mt-1 text-sm text-slate-300">Lv.{gameLevel} completed</p>
+            <p className="mt-1 text-sm text-slate-300">{singleLevel ? "本次 Flashcard 單字完成" : `Lv.${gameLevel} completed`}</p>
             <div className="mt-4 grid grid-cols-2 gap-2 text-left text-sm">
               <div className="rounded-md border border-white/10 bg-white/10 p-3">
                 <p className="text-xs text-slate-400">答對</p>
@@ -2024,9 +2102,11 @@ function DefenseGameView({
               >
                 重玩本關
               </button>
-              <button type="button" onClick={nextLevel} className="flex-1 rounded-lg bg-yellow-300 px-4 py-2 text-sm font-black text-slate-950">
-                下一關
-              </button>
+              {!singleLevel && (
+                <button type="button" onClick={nextLevel} className="flex-1 rounded-lg bg-yellow-300 px-4 py-2 text-sm font-black text-slate-950">
+                  下一關
+                </button>
+              )}
             </div>
           </div>
         </div>
