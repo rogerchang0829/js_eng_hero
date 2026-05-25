@@ -27,6 +27,7 @@ type GamePhase = "ready" | "playing" | "clear" | "over";
 
 interface WordItem {
   id: string;
+  senseId?: string;
   word: string;
   definitionZh: string;
   pos: string;
@@ -41,6 +42,10 @@ interface WordItem {
   usage?: string[];
   examples?: string[];
   mastery?: WordMastery;
+  reviewStatus?: "approved" | "review";
+  gameModesReady?: GameMode[];
+  sourceRow?: number;
+  datasetType?: "english-hero-official-v1";
 }
 
 interface WordMastery {
@@ -328,6 +333,7 @@ function normalizeWordRow(row: Partial<WordItem> & { word?: string; definitionZh
   const sentenceRaw = (row.sentence || `Use "${word}" in a sentence.`).trim();
   const mixed = splitMixedLangLine(sentenceRaw);
   return {
+    senseId: row.senseId?.trim(),
     word,
     definitionZh: (row.definitionZh || "（待補中文）").trim(),
     sentence: mixed.en || sentenceRaw,
@@ -341,6 +347,10 @@ function normalizeWordRow(row: Partial<WordItem> & { word?: string; definitionZh
     note: row.note?.trim(),
     usage: uniqNormalized((row.usage || []).filter(Boolean)),
     examples: uniqNormalized((row.examples || []).filter(Boolean)),
+    reviewStatus: row.reviewStatus,
+    gameModesReady: row.gameModesReady,
+    sourceRow: row.sourceRow,
+    datasetType: row.datasetType,
   };
 }
 
@@ -557,6 +567,7 @@ export default function EnglishHeroPage() {
   const [stats, setStats] = useState<Stats>({ totalHits: 0, totalMisses: 0, totalPracticeSeconds: 0 });
   const [gameSettings, setGameSettings] = useState<GameSettings>({ speed: 0.12, spawnMs: 2200, mode: "2-1", fontSize: 13 });
   const [flashcardDefenseWords, setFlashcardDefenseWords] = useState<WordItem[] | null>(null);
+  const [importNotice, setImportNotice] = useState("");
   const [isHydrated, setIsHydrated] = useState(false);
 
   const accuracy = useMemo(() => {
@@ -564,7 +575,11 @@ export default function EnglishHeroPage() {
     if (total === 0) return 0;
     return Math.round((stats.totalHits / total) * 100);
   }, [stats.totalHits, stats.totalMisses]);
-  const practiceWords = useMemo(() => sortForPractice(words), [words]);
+  const practiceWords = useMemo(() => sortForPractice(words.filter((word) => word.reviewStatus !== "review")), [words]);
+  const defenseWords = useMemo(() => {
+    const source = flashcardDefenseWords ?? practiceWords;
+    return source.filter((word) => !word.gameModesReady?.length || word.gameModesReady.includes(gameSettings.mode));
+  }, [flashcardDefenseWords, gameSettings.mode, practiceWords]);
 
   useEffect(() => {
     queueMicrotask(() => {
@@ -707,14 +722,43 @@ export default function EnglishHeroPage() {
     await enrichFromDictionary(item.id, item.word);
   };
 
-  const parseExcelFile = async (file: File): Promise<Omit<WordItem, "id">[]> => {
+  const parseExcelFile = async (file: File): Promise<{ words: Omit<WordItem, "id">[]; official: boolean }> => {
     const XLSX = await import("xlsx");
     const bytes = await file.arrayBuffer();
     const workbook = XLSX.read(bytes, { type: "array" });
-    const sheetName = workbook.SheetNames[0];
-    if (!sheetName) return [];
+    const sheetName = workbook.SheetNames.includes("Approved") ? "Approved" : workbook.SheetNames[0];
+    if (!sheetName) return { words: [], official: false };
     const sheet = workbook.Sheets[sheetName];
     const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: "" });
+    const official = rows.some((row) => String(row.datasetType ?? "") === "english-hero-official-v1");
+
+    if (official) {
+      const gameModes = new Set<GameMode>(["2-1", "2-2", "2-3", "3"]);
+      return {
+        official: true,
+        words: rows
+          .filter((row) => String(row.reviewStatus ?? "") === "approved" && String(row.word ?? "").trim())
+          .map((row) =>
+            normalizeWordRow({
+              senseId: String(row.senseId ?? "").trim(),
+              word: String(row.word ?? ""),
+              definitionZh: String(row.definitionZh ?? ""),
+              sentence: String(row.sentence ?? ""),
+              sentenceZh: String(row.sentenceZh ?? ""),
+              pos: String(row.pos ?? ""),
+              ipa: String(row.ipa ?? ""),
+              collocation: String(row.collocation ?? ""),
+              reviewStatus: "approved",
+              gameModesReady: String(row.gameModesReady ?? "")
+                .split("|")
+                .filter((mode): mode is GameMode => gameModes.has(mode as GameMode)),
+              sourceRow: Number(row.sourceRow) || undefined,
+              datasetType: "english-hero-official-v1",
+            }),
+          )
+          .filter((it): it is Omit<WordItem, "id"> => Boolean(it)),
+      };
+    }
 
     const keyify = (v: string) => v.trim().toLowerCase().replace(/[^a-z0-9]/g, "");
     const pick = (row: Record<string, unknown>, names: string[]) => {
@@ -728,8 +772,10 @@ export default function EnglishHeroPage() {
       return "";
     };
 
-    return rows
-      .map((row) => {
+    return {
+      official: false,
+      words: rows
+        .map((row) => {
         const vocabText = pick(row, ["word", "english", "vocab", "wordbank", "workbank"]);
         const longDefinition = pick(row, [
           "definitionzh",
@@ -758,16 +804,20 @@ export default function EnglishHeroPage() {
           usage: rich.usage,
           examples: rich.examples,
         });
-      })
-      .filter((it): it is Omit<WordItem, "id"> => Boolean(it));
+        })
+        .filter((it): it is Omit<WordItem, "id"> => Boolean(it)),
+    };
   };
 
   const handleDropImport = async (file: File) => {
     const lowerName = file.name.toLowerCase();
     let parsed: Omit<WordItem, "id">[] = [];
+    let official = false;
 
     if (lowerName.endsWith(".xlsx") || lowerName.endsWith(".xls")) {
-      parsed = await parseExcelFile(file);
+      const excelImport = await parseExcelFile(file);
+      parsed = excelImport.words;
+      official = excelImport.official;
     } else if (lowerName.endsWith(".csv")) {
       parsed = parseDelimitedRows(await file.text(), ",");
     } else if (lowerName.endsWith(".tsv")) {
@@ -797,11 +847,20 @@ export default function EnglishHeroPage() {
 
     if (parsed.length === 0) return;
     const prepared = toWordItems(parsed);
+    if (official) {
+      setWords(prepared);
+      setStats({ totalHits: 0, totalMisses: 0, totalPracticeSeconds: 0 });
+      setFlashcardDefenseWords(null);
+      setImportNotice(`已載入正式清洗字庫：${prepared.length} 個核准義項。測試用學習紀錄已重新開始。`);
+      setActiveTab("lab");
+      return;
+    }
     const incomingWords = new Set(prepared.map((x) => x.word));
     setWords((prev) => [...prepared, ...prev.filter((x) => !incomingWords.has(x.word))]);
     prepared.forEach((item) => {
       void enrichFromDictionary(item.id, item.word);
     });
+    setImportNotice(`已匯入 ${prepared.length} 筆資料。未經清洗的內容建議先在 Smart Lab 確認後再練習。`);
     setActiveTab("flashcard");
   };
 
@@ -826,6 +885,7 @@ export default function EnglishHeroPage() {
             onDropImport={handleDropImport}
             onBackupLearningData={handleBackupLearningData}
             onRestoreLearningData={handleRestoreLearningData}
+            importNotice={importNotice}
           />
         )}
         {activeTab === "flashcard" && (
@@ -833,7 +893,7 @@ export default function EnglishHeroPage() {
         )}
         {activeTab === "game" && (
           <DefenseGameView
-            words={flashcardDefenseWords ?? practiceWords}
+            words={defenseWords}
             settings={gameSettings}
             onChangeSettings={setGameSettings}
             onHit={() => setStats((prev) => ({ ...prev, totalHits: prev.totalHits + 1 }))}
@@ -890,6 +950,7 @@ function SmartLabView({
   onDropImport,
   onBackupLearningData,
   onRestoreLearningData,
+  importNotice,
 }: {
   words: WordItem[];
   onAddWord: (word: string, definitionZh: string, sentence: string) => Promise<void>;
@@ -897,6 +958,7 @@ function SmartLabView({
   onDropImport: (file: File) => Promise<void>;
   onBackupLearningData: () => void;
   onRestoreLearningData: (file: File) => Promise<void>;
+  importNotice: string;
 }) {
   const [newWord, setNewWord] = useState("");
   const [newDefinition, setNewDefinition] = useState("");
@@ -927,6 +989,11 @@ function SmartLabView({
 
   return (
     <div className="space-y-4 px-4 py-4">
+      {importNotice && (
+        <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm font-medium text-emerald-800">
+          {importNotice}
+        </div>
+      )}
       <section
         className={`rounded-2xl border-2 border-dashed p-5 text-center transition ${
           isDragging ? "border-blue-500 bg-blue-50" : "border-slate-300 bg-white"
@@ -1035,6 +1102,12 @@ function SmartLabView({
                   {w.ipa} · {w.pos}
                 </p>
                 <p className="mt-1 text-sm text-blue-700">{w.definitionZh}</p>
+                {w.reviewStatus === "approved" && (
+                  <div className="mt-2 flex flex-wrap gap-1">
+                    <span className="rounded-md bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-700">已核准義項</span>
+                    {w.senseId && <span className="rounded-md bg-slate-100 px-2 py-0.5 text-[10px] text-slate-500">{w.senseId}</span>}
+                  </div>
+                )}
               </div>
               <div className="flex shrink-0 items-start gap-2">
                 <button
@@ -1291,6 +1364,9 @@ function FlashcardView({
               {current.level && <span className="rounded-full bg-blue-50 px-2 py-1 text-[11px] text-blue-700">{current.level}</span>}
               {current.category && <span className="rounded-full bg-slate-100 px-2 py-1 text-[11px] text-slate-700">{current.category}</span>}
               <span className="rounded-full bg-slate-100 px-2 py-1 text-[11px] text-slate-700">{current.pos}</span>
+              {current.reviewStatus === "approved" && (
+                <span className="rounded-full bg-emerald-50 px-2 py-1 text-[11px] text-emerald-700">已核准</span>
+              )}
             </div>
             <div className="mt-5 rounded-xl bg-slate-50 p-3">
               <p className="text-xs font-semibold text-slate-500">核心義項</p>
