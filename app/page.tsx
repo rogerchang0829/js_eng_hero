@@ -140,24 +140,6 @@ interface DraggingAnswer extends AnswerOption {
 const BLUE = "#2563eb";
 const STARTING_HP = 5;
 const LEVEL_MUSIC_OFFSETS = [0, 18, 36, 54];
-const DISTRACTOR_ANSWERS = [
-  "timeline",
-  "brief",
-  "scope",
-  "asset",
-  "metric",
-  "policy",
-  "launch",
-  "archive",
-  "ticket",
-  "review",
-  "option",
-  "signal",
-  "sample",
-  "target",
-  "update",
-  "studio",
-];
 const LEVEL_THEMES = [
   {
     name: "Neon Grid",
@@ -894,6 +876,7 @@ export default function EnglishHeroPage() {
         {activeTab === "game" && (
           <DefenseGameView
             words={defenseWords}
+            distractorWords={practiceWords}
             settings={gameSettings}
             onChangeSettings={setGameSettings}
             onHit={() => setStats((prev) => ({ ...prev, totalHits: prev.totalHits + 1 }))}
@@ -1459,6 +1442,7 @@ function FlashcardView({
 
 function DefenseGameView({
   words,
+  distractorWords,
   settings,
   onChangeSettings,
   onHit,
@@ -1467,6 +1451,7 @@ function DefenseGameView({
   singleLevel = false,
 }: {
   words: WordItem[];
+  distractorWords: WordItem[];
   settings: GameSettings;
   onChangeSettings: (next: GameSettings) => void;
   onHit: () => void;
@@ -1490,6 +1475,8 @@ function DefenseGameView({
   const [particles, setParticles] = useState<HitParticle[]>([]);
   const [rewards, setRewards] = useState<RewardToast[]>([]);
   const [draggingAnswer, setDraggingAnswer] = useState<DraggingAnswer | null>(null);
+  const draggingAnswerRef = useRef<DraggingAnswer | null>(null);
+  const dragPointerIdRef = useRef<number | null>(null);
   const rafRef = useRef<number | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const playAreaRef = useRef<HTMLDivElement | null>(null);
@@ -1499,6 +1486,7 @@ function DefenseGameView({
   const beatStepRef = useRef(0);
   const timeUrgencyRef = useRef(0);
   const gameLevelRef = useRef(1);
+  const fallingRef = useRef(falling);
   const wordsRef = useRef(words);
   const singleLevelQueueRef = useRef<WordItem[]>([]);
   const isMatchMode = settings.mode === "2-2" || settings.mode === "3";
@@ -1511,26 +1499,39 @@ function DefenseGameView({
     });
     return Array.from(ids).sort().join("|");
   }, [falling]);
+  const activeQuestionRoundKey = useMemo(
+    () =>
+      falling
+        .filter((item) => !item.isHit && item.cardKind === "question")
+        .map((item) => item.gameId)
+        .sort()
+        .join("|"),
+    [falling],
+  );
   const answerOptions = useMemo<AnswerOption[]>(() => {
     if (!isMatchMode) return [];
     const questionIds = new Set(fallingQuestionKey.split("|").filter(Boolean));
     const visibleQuestions = words.filter((word) => questionIds.has(word.id));
     if (!visibleQuestions.length) return [];
-    const existingWords = new Set(words.map((word) => word.word.toLowerCase()));
     const validOptions = visibleQuestions.map((word) => ({
       optionId: `answer_${word.id}`,
       wordId: word.id,
       word: word.word,
     }));
-    const distractors = DISTRACTOR_ANSWERS.filter((word) => !existingWords.has(word.toLowerCase()))
-      .slice(0, 2)
-      .map((word, idx) => ({
-        optionId: `distractor_${settings.mode}_${idx}_${word}`,
-        word,
-        isDistractor: true,
-      }));
-    return shuffleByKey([...validOptions, ...distractors], `${settings.mode}_${fallingQuestionKey}`);
-  }, [fallingQuestionKey, isMatchMode, settings.mode, words]);
+    const visibleSpellings = new Set(visibleQuestions.map((word) => word.word.toLowerCase()));
+    const distractors = shuffleByKey(
+      distractorWords
+        .filter((word) => !questionIds.has(word.id) && !visibleSpellings.has(word.word.toLowerCase()))
+        .map((word) => ({
+          optionId: `distractor_${word.id}`,
+          word: word.word,
+          isDistractor: true,
+        })),
+      `${settings.mode}_${activeQuestionRoundKey}_distractors`,
+    )
+      .slice(0, 2);
+    return shuffleByKey([...validOptions, ...distractors], `${settings.mode}_${activeQuestionRoundKey}`);
+  }, [activeQuestionRoundKey, distractorWords, fallingQuestionKey, isMatchMode, settings.mode, words]);
   const levelGoal = singleLevel ? Math.max(words.length + 1, Math.ceil(words.length * 1.35)) : getLevelGoal(gameLevel);
   const levelTimeLimit = singleLevel ? Math.max(45, words.length * 7) : getLevelTimeLimit(gameLevel);
   const timeUrgency = 1 - timeRemaining / levelTimeLimit;
@@ -1545,6 +1546,10 @@ function DefenseGameView({
   useEffect(() => {
     wordsRef.current = words;
   }, [words]);
+
+  useEffect(() => {
+    fallingRef.current = falling;
+  }, [falling]);
 
   const resetSingleLevelQueue = useCallback(() => {
     singleLevelQueueRef.current = singleLevel ? [...wordsRef.current].sort(() => Math.random() - 0.5) : [];
@@ -2050,37 +2055,35 @@ function DefenseGameView({
     });
   };
 
-  const getPointerPosition = (event: React.PointerEvent<HTMLElement>) => {
+  const getPointerPosition = (clientX: number, clientY: number) => {
     const rect = playAreaRef.current?.getBoundingClientRect();
     if (!rect) return null;
     return {
-      x: Math.max(6, Math.min(94, ((event.clientX - rect.left) / rect.width) * 100)),
-      y: Math.max(-8, Math.min(90, ((event.clientY - rect.top) / window.innerHeight) * 100)),
+      x: Math.max(6, Math.min(94, ((clientX - rect.left) / rect.width) * 100)),
+      y: Math.max(-8, Math.min(90, ((clientY - rect.top) / window.innerHeight) * 100)),
     };
   };
 
   const onAnswerDragStart = (option: AnswerOption, event: React.PointerEvent<HTMLButtonElement>) => {
     if (!isMatchMode || phase !== "playing") return;
-    event.currentTarget.setPointerCapture(event.pointerId);
-    const position = getPointerPosition(event);
+    event.preventDefault();
+    const position = getPointerPosition(event.clientX, event.clientY);
     if (!position) return;
-    setDraggingAnswer({ ...option, ...position });
+    const dragged = { ...option, ...position };
+    dragPointerIdRef.current = event.pointerId;
+    draggingAnswerRef.current = dragged;
+    setDraggingAnswer(dragged);
   };
 
-  const onAnswerDragMove = (event: React.PointerEvent<HTMLButtonElement>) => {
-    if (!isMatchMode || phase !== "playing") return;
-    const position = getPointerPosition(event);
-    if (!position) return;
-    setDraggingAnswer((current) => (current ? { ...current, ...position } : current));
-  };
-
-  const onAnswerDragEnd = (event: React.PointerEvent<HTMLButtonElement>) => {
-    if (!isMatchMode || phase !== "playing") return;
-    const dragged = draggingAnswer;
-    const position = getPointerPosition(event);
+  const onAnswerDragEnd = (clientX: number, clientY: number) => {
+    const dragged = draggingAnswerRef.current;
+    const position = getPointerPosition(clientX, clientY);
+    draggingAnswerRef.current = null;
+    dragPointerIdRef.current = null;
     setDraggingAnswer(null);
+    if (!isMatchMode || phase !== "playing") return;
     if (!dragged || !position || dragged.isDistractor || !dragged.wordId) return;
-    const match = falling.find(
+    const match = fallingRef.current.find(
       (item) =>
         !item.isHit &&
         item.cardKind === "question" &&
@@ -2099,6 +2102,40 @@ function DefenseGameView({
       playExplosionSound();
     });
   };
+
+  const finishAnswerDragRef = useRef(onAnswerDragEnd);
+  const isDraggingAnswer = draggingAnswer !== null;
+
+  useEffect(() => {
+    finishAnswerDragRef.current = onAnswerDragEnd;
+  });
+
+  useEffect(() => {
+    if (!isDraggingAnswer) return;
+    const handlePointerMove = (event: PointerEvent) => {
+      if (event.pointerId !== dragPointerIdRef.current) return;
+      const position = getPointerPosition(event.clientX, event.clientY);
+      if (!position) return;
+      setDraggingAnswer((current) => {
+        if (!current) return current;
+        const next = { ...current, ...position };
+        draggingAnswerRef.current = next;
+        return next;
+      });
+    };
+    const handlePointerEnd = (event: PointerEvent) => {
+      if (event.pointerId !== dragPointerIdRef.current) return;
+      finishAnswerDragRef.current(event.clientX, event.clientY);
+    };
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerEnd);
+    window.addEventListener("pointercancel", handlePointerEnd);
+    return () => {
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerEnd);
+      window.removeEventListener("pointercancel", handlePointerEnd);
+    };
+  }, [isDraggingAnswer]);
 
   if (!words.length) return <EmptyView title="尚無可遊玩單字" description="先在 Smart Lab 建立單字庫，再開始防衛戰。" />;
 
@@ -2281,15 +2318,12 @@ function DefenseGameView({
                   key={option.optionId}
                   type="button"
                   onPointerDown={(event) => onAnswerDragStart(option, event)}
-                  onPointerMove={onAnswerDragMove}
-                  onPointerUp={onAnswerDragEnd}
-                  onPointerCancel={() => setDraggingAnswer(null)}
+                  onPointerUp={(event) => onAnswerDragEnd(event.clientX, event.clientY)}
+                  onPointerCancel={(event) => onAnswerDragEnd(event.clientX, event.clientY)}
                   className={`touch-none border-2 px-3 py-1.5 text-sm font-black shadow-[0_0_14px_rgba(250,204,21,0.18)] transition ${
                     draggingAnswer?.optionId === option.optionId
                       ? "scale-95 border-yellow-100 bg-yellow-300/30 text-yellow-50 opacity-50"
-                      : option.isDistractor
-                        ? "border-white/20 bg-slate-900/88 text-slate-300"
-                        : "border-yellow-300/60 bg-[#2a2109]/92 text-yellow-100 hover:border-yellow-100"
+                      : "border-yellow-300/60 bg-[#2a2109]/92 text-yellow-100 hover:border-yellow-100"
                   }`}
                 >
                   {option.word}
