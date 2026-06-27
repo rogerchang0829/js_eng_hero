@@ -349,6 +349,12 @@ function getWordAddedAt(word: WordItem): number {
   return Number.isFinite(idTimestamp) ? idTimestamp : 0;
 }
 
+function formatAddedDate(word: WordItem): string {
+  const addedAt = getWordAddedAt(word);
+  if (!addedAt) return "加入日期未知";
+  return new Intl.DateTimeFormat("zh-TW", { year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(addedAt));
+}
+
 function inferPos(raw: string): string {
   const t = raw.toLowerCase();
   if (t.includes("noun")) return "noun";
@@ -1122,6 +1128,7 @@ function SmartLabView({
                 <p className="text-xs text-slate-500">
                   {w.ipa} · {w.pos}
                 </p>
+                <p className="mt-0.5 text-xs text-slate-400">加入日期：{formatAddedDate(w)}</p>
                 <p className="mt-1 text-sm text-blue-700">{w.definitionZh}</p>
                 {w.reviewStatus === "approved" && (
                   <div className="mt-2 flex flex-wrap gap-1">
@@ -1558,6 +1565,7 @@ function DefenseGameView({
       wordId: word.id,
       word: word.word,
     }));
+    const distractorLimit = Math.max(0, 4 - validOptions.length);
     const visibleSpellings = new Set(visibleQuestions.map((word) => word.word.toLowerCase()));
     const distractors = shuffleByKey(
       distractorWords
@@ -1569,8 +1577,8 @@ function DefenseGameView({
         })),
       `${settings.mode}_${activeQuestionRoundKey}_distractors`,
     )
-      .slice(0, 2);
-    return shuffleByKey([...validOptions, ...distractors], `${settings.mode}_${activeQuestionRoundKey}`);
+      .slice(0, distractorLimit);
+    return shuffleByKey([...validOptions, ...distractors], `${settings.mode}_${activeQuestionRoundKey}`).slice(0, 4);
   }, [activeQuestionRoundKey, distractorWords, fallingQuestionKey, isMatchMode, settings.mode, words]);
   const levelGoal = singleLevel ? Math.max(words.length + 1, Math.ceil(words.length * 1.35)) : getLevelGoal(gameLevel);
   const levelTimeLimit = singleLevel ? Math.max(45, words.length * 7) : getLevelTimeLimit(gameLevel);
