@@ -10,8 +10,11 @@ import {
   Heart,
   Languages,
   Music2,
+  Pause,
+  Play,
   Plus,
   Sparkles,
+  Square,
   Timer,
   Trophy,
   Trash2,
@@ -23,10 +26,12 @@ import {
 
 type Tab = "lab" | "flashcard" | "game" | "outcome";
 type GameMode = "2-1" | "2-2" | "2-3" | "3";
-type GamePhase = "ready" | "playing" | "clear" | "over";
+type GamePhase = "ready" | "playing" | "paused" | "clear" | "over";
+type LabSort = "mastery" | "alphabetical" | "addedAt";
 
 interface WordItem {
   id: string;
+  addedAt?: number;
   senseId?: string;
   word: string;
   definitionZh: string;
@@ -306,7 +311,8 @@ function makeId() {
 }
 
 function toWordItems(source: Omit<WordItem, "id">[]): WordItem[] {
-  return source.map((item) => ({ ...item, id: makeId() }));
+  const importedAt = nowMs();
+  return source.map((item, idx) => ({ ...item, id: makeId(), addedAt: item.addedAt ?? importedAt + idx }));
 }
 
 function normalizeWordRow(row: Partial<WordItem> & { word?: string; definitionZh?: string }): Omit<WordItem, "id"> | null {
@@ -315,6 +321,7 @@ function normalizeWordRow(row: Partial<WordItem> & { word?: string; definitionZh
   const sentenceRaw = (row.sentence || `Use "${word}" in a sentence.`).trim();
   const mixed = splitMixedLangLine(sentenceRaw);
   return {
+    addedAt: row.addedAt,
     senseId: row.senseId?.trim(),
     word,
     definitionZh: (row.definitionZh || "（待補中文）").trim(),
@@ -334,6 +341,12 @@ function normalizeWordRow(row: Partial<WordItem> & { word?: string; definitionZh
     sourceRow: row.sourceRow,
     datasetType: row.datasetType,
   };
+}
+
+function getWordAddedAt(word: WordItem): number {
+  if (word.addedAt) return word.addedAt;
+  const idTimestamp = Number(word.id.split("_")[1]);
+  return Number.isFinite(idTimestamp) ? idTimestamp : 0;
 }
 
 function inferPos(raw: string): string {
@@ -589,14 +602,6 @@ export default function EnglishHeroPage() {
     localStorage.setItem("eh_v2_game_settings", JSON.stringify(gameSettings));
   }, [words, stats, gameSettings, isHydrated]);
 
-  useEffect(() => {
-    if (activeTab !== "game") return;
-    const timer = window.setInterval(() => {
-      setStats((prev) => ({ ...prev, totalPracticeSeconds: prev.totalPracticeSeconds + 1 }));
-    }, 1000);
-    return () => window.clearInterval(timer);
-  }, [activeTab]);
-
   const updateWord = (wordId: string, patch: Partial<WordItem>) => {
     setWords((prev) => prev.map((w) => (w.id === wordId ? { ...w, ...patch } : w)));
   };
@@ -694,6 +699,7 @@ export default function EnglishHeroPage() {
     if (!cleanWord) return;
     const item: WordItem = {
       id: makeId(),
+      addedAt: nowMs(),
       word: cleanWord,
       definitionZh: definitionZh.trim() || "（待補中文）",
       sentence: sentence.trim() || `I used "${cleanWord}" in a real project.`,
@@ -882,6 +888,7 @@ export default function EnglishHeroPage() {
             onHit={() => setStats((prev) => ({ ...prev, totalHits: prev.totalHits + 1 }))}
             onMiss={() => setStats((prev) => ({ ...prev, totalMisses: prev.totalMisses + 1 }))}
             onWordResult={recordDefenseResult}
+            onPracticeSecond={() => setStats((prev) => ({ ...prev, totalPracticeSeconds: prev.totalPracticeSeconds + 1 }))}
             singleLevel={Boolean(flashcardDefenseWords)}
           />
         )}
@@ -949,8 +956,15 @@ function SmartLabView({
   const [isDragging, setIsDragging] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [expandedMasteryId, setExpandedMasteryId] = useState<string | null>(null);
+  const [sortMode, setSortMode] = useState<LabSort>("mastery");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const restoreInputRef = useRef<HTMLInputElement | null>(null);
+  const sortedWords = useMemo(() => {
+    const list = [...words];
+    if (sortMode === "alphabetical") return list.sort((a, b) => a.word.localeCompare(b.word));
+    if (sortMode === "addedAt") return list.sort((a, b) => getWordAddedAt(b) - getWordAddedAt(a) || a.word.localeCompare(b.word));
+    return list.sort((a, b) => getMasterySnapshot(a).score - getMasterySnapshot(b).score || a.word.localeCompare(b.word));
+  }, [sortMode, words]);
 
   const onSubmit = async () => {
     setIsSubmitting(true);
@@ -1073,7 +1087,31 @@ function SmartLabView({
       </section>
 
       <section className="space-y-2">
-        {words.map((w) => {
+        <div className="rounded-2xl border border-slate-200 bg-white p-3 shadow-sm">
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <p className="text-sm font-semibold text-slate-700">單字列表</p>
+            <p className="text-xs text-slate-400">{words.length} 筆</p>
+          </div>
+          <div className="grid grid-cols-3 gap-1 rounded-xl bg-slate-100 p-1">
+            {[
+              { id: "mastery" as const, label: "熟練度" },
+              { id: "alphabetical" as const, label: "A-Z" },
+              { id: "addedAt" as const, label: "加入日期" },
+            ].map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => setSortMode(item.id)}
+                className={`rounded-lg px-2 py-1.5 text-xs font-semibold transition ${
+                  sortMode === item.id ? "bg-white text-blue-700 shadow-sm" : "text-slate-500"
+                }`}
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
+        </div>
+        {sortedWords.map((w) => {
           const mastery = getMasterySnapshot(w);
           const details = normalizeMastery(w.mastery);
           return (
@@ -1448,6 +1486,7 @@ function DefenseGameView({
   onHit,
   onMiss,
   onWordResult,
+  onPracticeSecond,
   singleLevel = false,
 }: {
   words: WordItem[];
@@ -1457,6 +1496,7 @@ function DefenseGameView({
   onHit: () => void;
   onMiss: () => void;
   onWordResult: (wordId: string, result: "correct" | "miss", answerMs?: number) => void;
+  onPracticeSecond: () => void;
   singleLevel?: boolean;
 }) {
   const [falling, setFalling] = useState<FallingWord[]>([]);
@@ -1621,6 +1661,12 @@ function DefenseGameView({
   useEffect(() => {
     resetSingleLevelQueue();
   }, [resetSingleLevelQueue, wordIdsKey]);
+
+  useEffect(() => {
+    if (phase !== "playing") return;
+    const timer = window.setInterval(onPracticeSecond, 1000);
+    return () => window.clearInterval(timer);
+  }, [onPracticeSecond, phase]);
 
   useEffect(() => {
     if (phase !== "playing") return;
@@ -1847,6 +1893,28 @@ function DefenseGameView({
       inputRef.current?.focus();
     }, 1450);
     window.setTimeout(() => window.clearTimeout(readyTimer), 760);
+  };
+
+  const pauseGame = () => {
+    if (phase !== "playing") return;
+    draggingAnswerRef.current = null;
+    dragPointerIdRef.current = null;
+    setDraggingAnswer(null);
+    setPhase("paused");
+  };
+
+  const resumeGame = () => {
+    if (phase !== "paused") return;
+    setPhase("playing");
+    inputRef.current?.focus();
+  };
+
+  const endGame = () => {
+    draggingAnswerRef.current = null;
+    dragPointerIdRef.current = null;
+    setDraggingAnswer(null);
+    setFalling([]);
+    setPhase("over");
   };
 
   const nextLevel = () => {
@@ -2167,6 +2235,39 @@ function DefenseGameView({
         </button>
       </div>
 
+      <div className="absolute right-3 top-3 z-20 flex gap-2">
+        {phase === "playing" && (
+          <button
+            type="button"
+            onClick={pauseGame}
+            className="flex items-center gap-1 rounded-md border border-white/20 bg-white/20 px-2 py-1 text-xs font-semibold text-white shadow-[0_0_14px_rgba(255,255,255,0.16)]"
+          >
+            <Pause size={14} />
+            暫停
+          </button>
+        )}
+        {phase === "paused" && (
+          <button
+            type="button"
+            onClick={resumeGame}
+            className="flex items-center gap-1 rounded-md border border-emerald-200/60 bg-emerald-300 px-2 py-1 text-xs font-black text-slate-950 shadow-[0_0_14px_rgba(110,231,183,0.42)]"
+          >
+            <Play size={14} />
+            繼續
+          </button>
+        )}
+        {(phase === "playing" || phase === "paused") && (
+          <button
+            type="button"
+            onClick={endGame}
+            className="flex items-center gap-1 rounded-md border border-rose-200/50 bg-rose-400/90 px-2 py-1 text-xs font-black text-slate-950 shadow-[0_0_14px_rgba(251,113,133,0.38)]"
+          >
+            <Square size={12} />
+            結束
+          </button>
+        )}
+      </div>
+
       <div className="absolute right-3 top-14 z-20 flex flex-col gap-2">
         {[
           { key: "2-1" as const, label: "2-1" },
@@ -2383,7 +2484,7 @@ function DefenseGameView({
           value={input}
           onChange={(e) => onType(e.target.value)}
           disabled={phase !== "playing" || isMatchMode}
-          placeholder={isMatchMode ? "drag cards to match..." : phase === "over" ? "Game over" : phase === "clear" ? "Level clear" : phase === "ready" ? "Ready..." : "type answer..."}
+          placeholder={isMatchMode ? "drag cards to match..." : phase === "paused" ? "Paused" : phase === "over" ? "Game over" : phase === "clear" ? "Level clear" : phase === "ready" ? "Ready..." : "type answer..."}
           className="w-full rounded-md border-2 border-cyan-300/60 bg-slate-950 px-4 py-3 text-base font-semibold text-white shadow-[0_0_18px_rgba(0,229,255,0.18)] outline-none focus:ring-2 focus:ring-yellow-300 disabled:opacity-50"
         />
       </div>
@@ -2392,6 +2493,33 @@ function DefenseGameView({
         <div className="absolute inset-0 z-30 flex items-center justify-center bg-slate-900/50 backdrop-blur-[1px]">
           <div className="rounded-2xl border border-blue-300/40 bg-slate-900/85 px-8 py-6 text-center">
             <p className="text-4xl font-extrabold tracking-wide text-blue-300">{readyText}</p>
+          </div>
+        </div>
+      )}
+
+      {phase === "paused" && (
+        <div className="absolute inset-0 z-30 flex items-center justify-center bg-slate-950/55 backdrop-blur-sm">
+          <div className="w-[min(86vw,320px)] rounded-2xl border border-white/15 bg-slate-900/90 p-5 text-center shadow-[0_0_36px_rgba(34,211,238,0.18)]">
+            <p className="text-xs font-semibold uppercase tracking-[0.2em] text-cyan-200">Paused</p>
+            <p className="mt-2 text-3xl font-black text-white">遊戲暫停</p>
+            <div className="mt-4 grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={resumeGame}
+                className="flex items-center justify-center gap-1 rounded-xl bg-emerald-300 px-3 py-2 text-sm font-black text-slate-950"
+              >
+                <Play size={16} />
+                繼續
+              </button>
+              <button
+                type="button"
+                onClick={endGame}
+                className="flex items-center justify-center gap-1 rounded-xl bg-rose-400 px-3 py-2 text-sm font-black text-slate-950"
+              >
+                <Square size={14} />
+                結束
+              </button>
+            </div>
           </div>
         </div>
       )}
