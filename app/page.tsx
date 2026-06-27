@@ -1128,7 +1128,6 @@ function SmartLabView({
                 <p className="text-xs text-slate-500">
                   {w.ipa} · {w.pos}
                 </p>
-                <p className="mt-0.5 text-xs text-slate-400">加入日期：{formatAddedDate(w)}</p>
                 <p className="mt-1 text-sm text-blue-700">{w.definitionZh}</p>
                 {w.reviewStatus === "approved" && (
                   <div className="mt-2 flex flex-wrap gap-1">
@@ -1137,23 +1136,26 @@ function SmartLabView({
                   </div>
                 )}
               </div>
-              <div className="flex shrink-0 items-start gap-2">
-                <button
-                  type="button"
-                  onClick={() => setExpandedMasteryId((current) => (current === w.id ? null : w.id))}
-                  className="rounded-lg border border-blue-100 bg-blue-50 px-2 py-1 text-right"
-                >
-                  <span className="block text-[10px] font-semibold text-blue-500">熟練度</span>
-                  <span className="block text-lg font-black leading-none text-blue-700">{mastery.score}</span>
-                  <span className="block text-[10px] text-blue-500">{mastery.label}</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => onDeleteWord(w.id)}
-                  className="rounded-lg p-1.5 text-slate-400 transition hover:bg-red-50 hover:text-red-500"
-                >
-                  <Trash2 size={16} />
-                </button>
+              <div className="flex shrink-0 flex-col items-end gap-1">
+                <div className="flex items-start gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setExpandedMasteryId((current) => (current === w.id ? null : w.id))}
+                    className="rounded-lg border border-blue-100 bg-blue-50 px-2 py-1 text-right"
+                  >
+                    <span className="block text-[10px] font-semibold text-blue-500">熟練度</span>
+                    <span className="block text-lg font-black leading-none text-blue-700">{mastery.score}</span>
+                    <span className="block text-[10px] text-blue-500">{mastery.label}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onDeleteWord(w.id)}
+                    className="rounded-lg p-1.5 text-slate-400 transition hover:bg-red-50 hover:text-red-500"
+                  >
+                    <Trash2 size={16} />
+                  </button>
+                </div>
+                <p className="max-w-[112px] text-right text-[10px] leading-tight text-slate-400">加入日期：{formatAddedDate(w)}</p>
               </div>
             </div>
             {expandedMasteryId === w.id && (
